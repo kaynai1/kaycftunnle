@@ -18,7 +18,7 @@ mkdir -p ~/kaycftunnle && cd ~/kaycftunnle
 ### 2. 下载一键部署文件
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kaynai/kaycftunnle/main/docker-compose.deploy.yml -o docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/kaynai1/kaycftunnle/main/docker-compose.deploy.yml -o docker-compose.yml
 ```
 
 或者直接新建 `docker-compose.yml`，写入：
@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/kaynai/kaycftunnle/main/docker-comp
 ```yaml
 services:
   kaycftunnle:
-    image: ghcr.io/kaynai/kaycftunnle:latest
+    image: ghcr.io/kaynai1/kaycftunnle:latest
     container_name: kaycftunnle
     restart: unless-stopped
     environment:
@@ -67,7 +67,7 @@ docker compose up -d
 ```bash
 ssh root@你的NAS_IP
 cd /vol1/1000/qd  # 或你喜欢的目录
-git clone https://github.com/kaynai/kaycftunnle.git
+git clone https://github.com/kaynai1/kaycftunnle.git
 cd kaycftunnle
 ```
 
@@ -97,7 +97,7 @@ sudo sh packaging/fnos/build-image-on-nas.sh
 
 ```bash
 # 1. clone 源码
-git clone https://github.com/kaynai/kaycftunnle.git
+git clone https://github.com/kaynai1/kaycftunnle.git
 cd kaycftunnle
 
 # 2. 本地构建并启动
@@ -121,6 +121,6 @@ docker compose up -d --build
 
 首次推送后，镜像包默认是 **Private**。其他用户/你的 NAS 直接拉取会报未授权，需要到 GitHub 设置为 Public：
 
-1. 打开 https://github.com/kaynai?tab=packages
+1. 打开 https://github.com/kaynai1?tab=packages
 2. 点击 `kaycftunnle`
 3. 右侧 **Package settings** → **Change visibility** → **Public** → 保存

@@ -9,7 +9,7 @@
 
 services:
   kaycftunnle:
-    image: ghcr.io/kaynai/kaycftunnle:latest
+    image: ghcr.io/kaynai1/kaycftunnle:latest
     container_name: kaycftunnle
     restart: unless-stopped
     environment:

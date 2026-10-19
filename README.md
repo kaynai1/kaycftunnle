@@ -12,7 +12,7 @@
 - **本地源码构建**：
 
 ```bash
-git clone https://github.com/kaynai/kaycftunnle.git
+git clone https://github.com/kaynai1/kaycftunnle.git
 cd kaycftunnle
 docker compose up -d --build
 ```
