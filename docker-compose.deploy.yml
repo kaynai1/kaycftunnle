@@ -1,0 +1,35 @@
+# Kay-cftunnle 面板 · 一键部署（GHCR 预构建镜像）
+# SPDX-License-Identifier: MIT
+#
+# 用法：在本文件所在目录执行
+#   docker compose -f docker-compose.deploy.yml up -d
+#
+# 浏览器访问 http://NAS_IP:8000
+# 默认账号：admin   默认密码：123456
+
+services:
+  kaycftunnle:
+    image: ghcr.io/kaynai/kaycftunnle:latest
+    container_name: kaycftunnle
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+      - DASHBOARD_HOST=0.0.0.0
+      - DASHBOARD_PORT=8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./runtime:/app/runtime
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,119 @@
+#!/bin/bash
+# Kay-cftunnle 生命周期控制
+# 退出码约定：start/stop 0=成功 1=失败；status 0=运行中 3=未运行
+#
+# 重要：本应用镜像是「随包内嵌 / 用户本地导入」的私有镜像，公网上并不存在，
+#       所以这里绝不能在缺镜像时自动 pull，否则会卡在
+#       registry-1.docker.io 的 context deadline exceeded 上，安装直接失败。
+
+COMPOSE_DIR="${TRIM_APPDEST}/docker"
+CONTAINER_NAME="kaycftunnle"
+
+log_err() {
+    # 写入飞牛日志文件，用户能在界面上看到
+    if [ -n "$TRIM_TEMP_LOGFILE" ]; then
+        echo "$1" > "$TRIM_TEMP_LOGFILE"
+    fi
+    echo "$1" >&2
+}
+
+compose() {
+    # 优先用 docker compose 插件，其次 docker-compose
+    if docker compose version >/dev/null 2>&1; then
+        docker compose -f "${COMPOSE_DIR}/docker-compose.yaml" --env-file "${COMPOSE_DIR}/.env" "$@"
+    else
+        docker-compose -f "${COMPOSE_DIR}/docker-compose.yaml" --env-file "${COMPOSE_DIR}/.env" "$@"
+    fi
+}
+
+# 读取当前镜像名：优先 .env，其次 env.default，最后兜底
+read_image_name() {
+    local name=""
+    if [ -f "${COMPOSE_DIR}/.env" ]; then
+        name=$(grep -E '^KAY_CFTUNNLE_IMAGE=' "${COMPOSE_DIR}/.env" 2>/dev/null | cut -d= -f2)
+    fi
+    if [ -z "$name" ] && [ -f "${COMPOSE_DIR}/env.default" ]; then
+        name=$(grep -E '^KAY_CFTUNNLE_IMAGE=' "${COMPOSE_DIR}/env.default" 2>/dev/null | cut -d= -f2)
+    fi
+    [ -n "$name" ] || name="kaycftunnle:latest"
+    echo "$name"
+}
+
+# 镜像缺失时的兜底：尝试导入随包 image.tar
+try_load_embedded_image() {
+    local tar="${COMPOSE_DIR}/image.tar"
+    [ -f "$tar" ] || return 1
+    echo "检测到随包镜像，正在导入…"
+    docker load -i "$tar" >/dev/null 2>&1 || return 1
+    return 0
+}
+
+case "$1" in
+start)
+    if [ ! -f "${COMPOSE_DIR}/docker-compose.yaml" ]; then
+        log_err "缺少 docker-compose.yaml，请重新安装应用。"
+        exit 1
+    fi
+    # 首次启动时 .env 可能还没生成（例如升级路径），补一次
+    if [ ! -f "${COMPOSE_DIR}/.env" ]; then
+        CMD_DIR="$(dirname "$(readlink -f "$0")")"
+        [ -x "${CMD_DIR}/install_callback" ] && "${CMD_DIR}/install_callback" >/dev/null 2>&1 || true
+    fi
+
+    IMAGE_NAME=$(read_image_name)
+
+    # 远程仓库镜像（名字带 /，如 ghcr.io/user/kaycftunnle）由 compose 负责拉取，
+    # 本地查不到是正常的，不能在这里拦。
+    case "$IMAGE_NAME" in
+        */*)
+            REMOTE_IMAGE="yes"
+            ;;
+        *)
+            REMOTE_IMAGE="no"
+            ;;
+    esac
+
+    # 本地镜像：缺了只做本地兜底（导入随包 image.tar），绝不联网 pull
+    if [ "$REMOTE_IMAGE" = "no" ]; then
+        if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+            try_load_embedded_image || true
+        fi
+        if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+            log_err "找不到本地镜像 ${IMAGE_NAME}。"
+            log_err "该镜像是自建镜像，公网上没有，无法在线拉取。"
+            log_err "解决办法（任选其一）："
+            log_err "  1) 在项目源码目录执行：  sudo sh build-on-nas.sh"
+            log_err "  2) 把构建好的 kaycftunnle.tar 拷到 NAS，执行："
+            log_err "     docker load -i kaycftunnle.tar"
+            log_err "  3) 重新安装内嵌了镜像的安装包（体积约 200-300MB）"
+            log_err "完成后再回应用中心点「启动」。"
+            exit 1
+        fi
+    fi
+
+    if ! compose up -d --remove-orphans >/dev/null 2>&1; then
+        log_err "容器启动失败，请检查 Docker 服务是否运行、端口 8000 是否被占用。"
+        log_err "可用  docker logs kaycftunnle --tail 50  查看具体原因。"
+        exit 1
+    fi
+    exit 0
+    ;;
+
+stop)
+    compose down >/dev/null 2>&1 || true
+    exit 0
+    ;;
+
+status)
+    # 容器存在且状态为 running 才算运行中
+    STATE=$(docker inspect -f '{{.State.Running}}' "${CONTAINER_NAME}" 2>/dev/null)
+    if [ "$STATE" = "true" ]; then
+        exit 0
+    fi
+    exit 3
+    ;;
+
+*)
+    exit 1
+    ;;
+esac

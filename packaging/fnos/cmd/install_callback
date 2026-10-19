@@ -1,0 +1,72 @@
+#!/bin/bash
+# 安装完成后：准备数据目录、.env，并在必要时导入随包镜像
+# 飞牛注入：TRIM_APPDEST / TRIM_PKGETC / TRIM_PKGVAR / TRIM_PKGTMP / TRIM_USERNAME
+
+set -e
+
+COMPOSE_DIR="${TRIM_APPDEST}/docker"
+ENV_FILE="${COMPOSE_DIR}/.env"
+IMAGE_DEFAULT_FILE="${COMPOSE_DIR}/env.default"
+
+# 数据目录：优先系统分配的应用数据目录
+DATA_ROOT="${TRIM_PKGVAR}"
+[ -n "$DATA_ROOT" ] || DATA_ROOT="/vol1/@appdata/kaycftunnle"
+
+mkdir -p "${DATA_ROOT}/data" "${DATA_ROOT}/runtime"
+chown -R "${TRIM_USERNAME:-kaycftunnle}:${TRIM_USERNAME:-kaycftunnle}" "${DATA_ROOT}" 2>/dev/null || true
+chmod 700 "${DATA_ROOT}/data" "${DATA_ROOT}/runtime" 2>/dev/null || true
+
+# 镜像名：来自构建时写入的 env.default
+# 兜底值必须与 docker-compose.yaml / build.sh 保持一致，否则会找不到镜像
+IMAGE_NAME="kaycftunnle:latest"
+PULL_POLICY=""
+if [ -f "$IMAGE_DEFAULT_FILE" ]; then
+    V=$(grep -E '^KAY_CFTUNNLE_IMAGE=' "$IMAGE_DEFAULT_FILE" | cut -d= -f2)
+    [ -n "$V" ] && IMAGE_NAME="$V"
+    P=$(grep -E '^KAY_CFTUNNLE_PULL_POLICY=' "$IMAGE_DEFAULT_FILE" | cut -d= -f2)
+    [ -n "$P" ] && PULL_POLICY="$P"
+fi
+# 兜底：带 / 的是远程仓库（如 ghcr.io/user/kaycftunnle），需要允许拉取
+if [ -z "$PULL_POLICY" ]; then
+    case "$IMAGE_NAME" in
+        */*) PULL_POLICY="always" ;;
+        *)   PULL_POLICY="never" ;;
+    esac
+fi
+
+# 端口：保留上一次的配置，保证幂等
+PORT="8000"
+if [ -f "${ENV_FILE}" ]; then
+    OLD_PORT=$(grep -E '^KAY_CFTUNNLE_PORT=' "${ENV_FILE}" | cut -d= -f2)
+    [ -n "$OLD_PORT" ] && PORT="$OLD_PORT"
+fi
+[ -n "$TRIM_SERVICE_PORT" ] && PORT="$TRIM_SERVICE_PORT"
+true
+
+cat > "${ENV_FILE}" <<EOF
+KAY_CFTUNNLE_PORT=${PORT}
+KAY_CFTUNNLE_DATA=${DATA_ROOT}
+KAY_CFTUNNLE_IMAGE=${IMAGE_NAME}
+KAY_CFTUNNLE_PULL_POLICY=${PULL_POLICY}
+EOF
+chown "${TRIM_USERNAME:-kaycftunnle}:${TRIM_USERNAME:-kaycftunnle}" "${ENV_FILE}" 2>/dev/null || true
+
+# 随包镜像：若存在 image.tar 且本地没有该镜像，则导入
+IMG_TAR="${COMPOSE_DIR}/image.tar"
+if [ -f "$IMG_TAR" ]; then
+    if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+        echo "正在导入随包镜像 ${IMAGE_NAME}…"
+        docker load -i "$IMG_TAR" >>"${TRIM_TEMP_LOGFILE:-/dev/null}" 2>&1 || {
+            echo "镜像导入失败，请检查磁盘空间。" >"${TRIM_TEMP_LOGFILE:-/dev/stderr}"
+        }
+    fi
+else
+    # 没有随包镜像：明确提示，避免用户以为装好了
+    if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+        echo "提示：本安装包未内嵌镜像，且 NAS 上暂无 ${IMAGE_NAME}。"
+        echo "      请在 NAS 终端执行  docker load -i kaycftunnle.tar  导入镜像后再启动。"
+    fi
+fi
+
+echo "Kay-cftunnle 数据目录：${DATA_ROOT}，端口：${PORT}"
+exit 0

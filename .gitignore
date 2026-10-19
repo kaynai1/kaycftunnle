@@ -1,0 +1,25 @@
+# 运行期数据与日志（包含数据库、Cloudflare 凭证等敏感信息，切勿提交）
+data/
+runtime/
+logs/
+*.log
+
+# 构建产物与打包缓存
+dist/
+.fpk-build/
+.fnpack/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 编辑器与系统文件
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 本地测试用脚本/密钥
+*.env
+.env

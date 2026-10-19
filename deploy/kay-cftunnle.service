@@ -1,0 +1,25 @@
+[Unit]
+Description=Kay-cftunnle - Cloudflare Tunnel self-hosted console
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cfrun
+Group=cfrun
+WorkingDirectory=/opt/kay-cftunnle
+ExecStart=/usr/bin/python3 /opt/kay-cftunnle/server.py --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=3
+Environment=TZ=Asia/Shanghai
+Environment=PYTHONUNBUFFERED=1
+
+# 最小权限加固
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/kay-cftunnle/data /opt/kay-cftunnle/runtime
+
+[Install]
+WantedBy=multi-user.target

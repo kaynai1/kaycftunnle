@@ -1,0 +1,18 @@
+#!/bin/bash
+# 卸载后：停止并清理容器（保留数据目录，尊重用户数据）
+# 若需要连数据一起删除，飞牛会在用户勾选后自行处理 @appdata 目录。
+
+COMPOSE_DIR="${TRIM_APPDEST}/docker"
+
+if [ -f "${COMPOSE_DIR}/docker-compose.yaml" ]; then
+    if docker compose version >/dev/null 2>&1; then
+        docker compose -f "${COMPOSE_DIR}/docker-compose.yaml" down --remove-orphans >/dev/null 2>&1 || true
+    elif command -v docker-compose >/dev/null 2>&1; then
+        docker-compose -f "${COMPOSE_DIR}/docker-compose.yaml" down --remove-orphans >/dev/null 2>&1 || true
+    fi
+fi
+
+# 兜底：确保同名容器已移除
+docker rm -f kaycftunnle >/dev/null 2>&1 || true
+
+exit 0

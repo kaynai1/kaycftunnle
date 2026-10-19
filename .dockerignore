@@ -1,0 +1,36 @@
+# 构建上下文排除项：镜像只需要 server.py / cf.py / static/
+# 其余全部排除，把构建上下文从 MB 级压到 KB 级
+
+.git
+.gitignore
+.gitattributes
+
+# 运行期数据与日志（绝对不能进镜像，避免把本机数据带到 NAS）
+data/
+runtime/
+logs/
+*.log
+
+# 打包与构建产物
+dist/
+.fpk-build/
+.fnpack/
+packaging/
+
+# 编辑器 / 系统垃圾
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+__pycache__/
+*.py[cod]
+
+# 文档
+README.md
+*.md
+LICENSE
+
+# 本地部署脚本（宿主机直装用，镜像内不需要）
+deploy/
+*.bat
+*.ps1

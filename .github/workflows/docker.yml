@@ -1,0 +1,92 @@
+# Kay-cftunnle · Docker 多架构自动构建
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 EasonShu
+#
+# 产物：ghcr.io/<owner>/kaycftunnle:<tag>
+#   - 推 main/master      → latest + main
+#   - 推 v1.0.0 这样的 tag → 1.0.0 + 1.0 + latest
+#   - 任意分支            → 分支名
+#
+# 注意：
+#   1. GHCR 要求镜像路径全小写，所以这里不用 github.repository（会带大写用户名），
+#      而是固定用 kaycftunnle 作为包名。
+#   2. 首次推送后，包默认是 private。需要到 GitHub → 你的个人主页 → Packages →
+#      kaycftunnle → Package settings → Change visibility → Public，
+#      否则 NAS 拉取时需要 docker login。
+
+name: Docker Multi-Arch Build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  # 固定小写包名，避免用户名含大写导致 push 失败
+  IMAGE_NAME: kaycftunnle
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 输出镜像地址
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "### 镜像已推送" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "NAS 拉取命令：" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${REGISTRY}/${{ github.repository_owner }}/${IMAGE_NAME}:latest" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
