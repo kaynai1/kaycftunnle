@@ -1495,6 +1495,51 @@ class PanelHandler(BaseHTTPRequestHandler):
                 ing["dns_missing"] = bool(names) and full not in names
         self._send_json({"ok": True, "configured": True, "ingresses": ingresses})
 
+    def _upsert_dns_cname(self, client, zone_id: str, full_name: str, cname_target: str) -> str:
+        """创建或原地更新同名 CNAME，避免 Cloudflare 81053（记录已存在）。
+
+        逻辑：先按名字精确查一次 → 命中就 PUT 更新（顺带把历史 A/AAAA 记录改写成 CNAME）
+        → 没命中才 POST 创建；若创建仍撞「已存在」（查询与创建之间的竞态），再查一次改更新。
+        返回最终使用的 DNS 记录 id。
+        """
+        def _find() -> Optional[Dict[str, Any]]:
+            try:
+                recs = client.list_dns_records(zone_id, name=full_name)
+            except CloudflareError as exc:
+                add_log("ingress", "查询 DNS 记录失败：" + str(exc), "warn")
+                return None
+            for rec in recs:
+                if (rec.get("name") or "").lower() == full_name.lower():
+                    return rec
+            return None
+
+        existing = _find()
+        if existing:
+            record_id = existing.get("id") or ""
+            if existing.get("type") == "CNAME" and (existing.get("content") or "") == cname_target:
+                # 已经完全一致，无需再调写接口
+                return record_id
+            client.update_dns_record(zone_id, record_id, full_name, cname_target, "CNAME", True, 1)
+            add_log("ingress", "DNS 记录已存在，改为原地更新：" + full_name)
+            return record_id
+
+        try:
+            record = client.create_dns_record(zone_id, full_name, cname_target, "CNAME", True, 1)
+            return (record.get("id") or "") if isinstance(record, dict) else str(record or "")
+        except CloudflareError as exc:
+            msg = str(exc).lower()
+            if "already exists" not in msg and "81053" not in msg:
+                raise
+            # 竞态兜底：查询时还没有、创建时已被占用
+            race = _find()
+            if not race:
+                raise
+            client.update_dns_record(
+                zone_id, race.get("id") or "", full_name, cname_target, "CNAME", True, 1
+            )
+            add_log("ingress", "DNS 记录并发冲突，已改为原地更新：" + full_name, "warn")
+            return race.get("id") or ""
+
     def _api_ingress_create(self) -> None:
         body = self._read_body()
         subdomain = str(body.get("subdomain") or "").strip().lower()
@@ -1526,10 +1571,9 @@ class PanelHandler(BaseHTTPRequestHandler):
             return
         full_name = subdomain + "." + zone_name
         cname_target = tunnel_id + ".cfargotunnel.com"
-        # 创建 Cloudflare DNS 记录
+        # 创建 Cloudflare DNS 记录（已存在同名记录时自动改为更新，不再报 81053）
         try:
-            record = client.create_dns_record(zone_id, full_name, cname_target, "CNAME", True, 1)
-            record_id = (record.get("id") or "") if isinstance(record, dict) else str(record or "")
+            record_id = self._upsert_dns_cname(client, zone_id, full_name, cname_target)
         except CloudflareError as exc:
             add_log("ingress", "DNS 记录创建失败：" + str(exc), "warn")
             self._send_error_json(400, "Cloudflare DNS 创建失败：" + str(exc))
@@ -1593,8 +1637,8 @@ class PanelHandler(BaseHTTPRequestHandler):
                     add_log("ingress", "DNS 记录原地更新失败，尝试重建：" + str(exc), "warn")
             if not updated:
                 try:
-                    record = client.create_dns_record(row["zone_id"], full_name, cname_target, "CNAME", True, 1)
-                    new_record_id = (record.get("id") or "") if isinstance(record, dict) else str(record or "")
+                    # 记录可能被手工删除：走 upsert，存在则更新、不存在才创建
+                    new_record_id = self._upsert_dns_cname(client, row["zone_id"], full_name, cname_target)
                 except CloudflareError as exc:
                     add_log("ingress", "DNS 记录重建失败：" + str(exc), "warn")
                     self._send_error_json(400, "Cloudflare DNS 更新失败：" + str(exc))
@@ -1676,6 +1720,14 @@ class PanelHandler(BaseHTTPRequestHandler):
     def _api_connector_start(self) -> None:
         body = self._read_body()
         tunnel_id = str(body.get("tunnel_id") or "").strip()
+        # 单连接器模型：已经连着另一条隧道时，先断开再切过去，
+        # 否则 start() 会直接返回「连接器已在运行中」
+        status = CONNECTOR.status()
+        if status.get("running") and tunnel_id:
+            current = status.get("current_tunnel_id") or ""
+            if current != tunnel_id:
+                CONNECTOR.stop(by_user=False)
+                add_log("connector", "切换到隧道 " + tunnel_id[:8])
         CONNECTOR.reset_watchdog()
         result = CONNECTOR.start(tunnel_id)
         if result.get("ok"):
