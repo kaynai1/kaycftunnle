@@ -110,6 +110,7 @@ docker compose up -d --build
 
 | 现象 | 原因 / 处理 |
 |---|---|
+| 打开后是**别的应用**（如 Kay-WebCheck-in） | 8000 端口被其他容器占用，kaycftunnle 没抢到端口。先 `docker ps --format '{{.Names}}\t{{.Ports}}'` 看谁占了 8000，然后把本项目改成 `8100:8000` 重新部署，访问 `http://NAS_IP:8100`。 |
 | `No such image: kaycftunnle:latest` | 说明你安装的 fpk 是轻量版，没有内嵌镜像。请改用方式二在 NAS 上重新打包。 |
 | `context deadline exceeded` / Docker Hub 超时 | Dockerfile 默认从 Docker Hub 拉取基础镜像，网络不佳时会超时。可在 NAS 上先 `docker pull` 国内镜像，再构建；或换用方式一直接拉取 GHCR 镜像。 |
 | 打不开 8000 端口 | 检查 NAS 防火墙 / 安全组是否放行 8000 端口。 |
