@@ -682,11 +682,42 @@
             (cloudActive && t.connections ? " · 活跃连接 " + esc(t.connections) : "") + '</div>' +
         '</div>' +
         '<div class="tunnel-actions">' +
+          (localRunning
+            ? '<button class="btn btn-danger-ghost btn-sm" type="button" data-act="disconnect">断开</button>'
+            : '<button class="btn btn-primary btn-sm" type="button" data-act="connect">连接</button>') +
           '<button class="btn btn-ghost btn-sm" type="button" data-act="token">获取令牌</button>' +
           '<button class="btn btn-danger-ghost btn-sm" type="button" data-act="del">删除</button>' +
         '</div>' +
       '</div>';
     }).join("");
+  }
+
+  function connectTunnel(id, name, btn) {
+    var old = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "连接中…";
+    api("POST", "/connector/start", { tunnel_id: id }).then(function () {
+      toast("已连接隧道「" + name + "」");
+      refreshTunnels();
+    }).catch(function (err) {
+      toast("连接失败：" + err.message);
+      btn.disabled = false;
+      btn.textContent = old;
+    });
+  }
+
+  function disconnectTunnel(btn) {
+    var old = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "断开中…";
+    api("POST", "/connector/stop", {}).then(function () {
+      toast("已断开连接");
+      refreshTunnels();
+    }).catch(function (err) {
+      toast("断开失败：" + err.message);
+      btn.disabled = false;
+      btn.textContent = old;
+    });
   }
 
   function onTunnelsClick(ev) {
@@ -696,7 +727,10 @@
     if (!item) return;
     var id = item.getAttribute("data-id");
     var name = item.getAttribute("data-name");
-    if (btn.getAttribute("data-act") === "token") showTunnelToken(id);
+    var act = btn.getAttribute("data-act");
+    if (act === "token") showTunnelToken(id);
+    else if (act === "connect") connectTunnel(id, name, btn);
+    else if (act === "disconnect") disconnectTunnel(btn);
     else deleteTunnel(id, name);
   }
 
