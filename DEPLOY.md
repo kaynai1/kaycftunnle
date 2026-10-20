@@ -32,9 +32,9 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - DASHBOARD_HOST=0.0.0.0
-      - DASHBOARD_PORT=8000
+      - DASHBOARD_PORT=8567
     ports:
-      - "8000:8000"
+      - "8567:8567"
     volumes:
       - ./data:/app/data
       - ./runtime:/app/runtime
@@ -48,7 +48,7 @@ docker compose up -d
 
 ### 4. 访问
 
-浏览器打开 `http://<你的服务器IP>:8000`
+浏览器打开 `http://<你的服务器IP>:8567`
 
 > 注意：首次推送后，GitHub Actions 需要 3-5 分钟构建镜像。如果提示镜像不存在，请到仓库 Actions 页面查看构建进度。
 
@@ -110,10 +110,10 @@ docker compose up -d --build
 
 | 现象 | 原因 / 处理 |
 |---|---|
-| 打开后是**别的应用**（如 Kay-WebCheck-in） | 8000 端口被其他容器占用，kaycftunnle 没抢到端口。先 `docker ps --format '{{.Names}}\t{{.Ports}}'` 看谁占了 8000，然后把本项目改成 `8100:8000` 重新部署，访问 `http://NAS_IP:8100`。 |
+| 打开后是**别的应用**（如 Kay-WebCheck-in） | 8567 端口被其他容器占用，kaycftunnle 没抢到端口。先 `docker ps --format '{{.Names}}\t{{.Ports}}'` 看谁占了 8567，再把 compose 里的映射改成别的宿主端口（例如 `"8600:8567"`）重新部署，访问 `http://NAS_IP:8600`。 |
 | `No such image: kaycftunnle:latest` | 说明你安装的 fpk 是轻量版，没有内嵌镜像。请改用方式二在 NAS 上重新打包。 |
 | `context deadline exceeded` / Docker Hub 超时 | Dockerfile 默认从 Docker Hub 拉取基础镜像，网络不佳时会超时。可在 NAS 上先 `docker pull` 国内镜像，再构建；或换用方式一直接拉取 GHCR 镜像。 |
-| 打不开 8000 端口 | 检查 NAS 防火墙 / 安全组是否放行 8000 端口。 |
+| 打不开 8567 端口 | 检查 NAS 防火墙 / 安全组是否放行 8567 端口。 |
 | 登录提示密码错误 | 默认密码已改为 `123456`。如果仍失败，检查 `data/workbench.json` 是否已开启无密码模式。 |
 
 ---

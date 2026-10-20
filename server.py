@@ -22,7 +22,7 @@
 环境变量：
   KAY_CFTUNNLE_ROOT  工作台根目录，默认取 server.py 所在目录
   DASHBOARD_HOST  监听地址，默认 0.0.0.0
-  DASHBOARD_PORT  监听端口，默认 8000
+  DASHBOARD_PORT  监听端口，默认 8567
   DASHBOARD_TZ    日期时区，默认 Asia/Shanghai
 """
 
@@ -1867,7 +1867,7 @@ CONNECTOR = ConnectorManager({"connector": DEFAULT_CONFIG["connector"]})
 def main() -> None:
     parser = argparse.ArgumentParser(description="Kay-cftunnle 服务端")
     parser.add_argument("--host", default=os.environ.get("DASHBOARD_HOST", "0.0.0.0"))
-    parser.add_argument("--port", type=int, default=int(os.environ.get("DASHBOARD_PORT", "8000")))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("DASHBOARD_PORT", "8567")))
     parser.add_argument("--check", action="store_true", help="只打印一次状态 JSON 后退出")
     args = parser.parse_args()
 

@@ -3,7 +3,7 @@
 # Copyright (c) 2026 EasonShu
 #
 # 用法：在本目录执行  docker compose up -d
-# 浏览器访问 http://NAS_IP:8000
+# 浏览器访问 http://NAS_IP:8567
 #
 # 如果使用预构建镜像（推荐），把 build 注释掉，取消 image 注释：
 #   image: ghcr.io/<你的用户名>/kaycftunnle:latest
@@ -18,11 +18,11 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
-      # 默认监听 0.0.0.0:8000，一般无需改
+      # 默认监听 0.0.0.0:8567，一般无需改
       - DASHBOARD_HOST=0.0.0.0
-      - DASHBOARD_PORT=8000
+      - DASHBOARD_PORT=8567
     ports:
-      - "8000:8000"
+      - "8567:8567"
     volumes:
       # 数据卷：把 NAS 上的目录映射进容器，容器删了数据还在
       # 请把左边的宿主机路径改成你 NAS 上的实际路径
@@ -30,7 +30,7 @@ services:
       # cloudflared 连接器运行期数据（PID、日志）
       - ./runtime:/app/runtime
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8567/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3

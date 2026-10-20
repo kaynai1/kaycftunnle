@@ -67,11 +67,11 @@ echo "网络："
 docker network ls --format '{{.Name}}' 2>/dev/null | grep -i kay | sed 's/^/  /' || echo "  （无）"
 
 # ---------------------------------------------------------------- 5. 端口
-sec "5. 端口 8000 占用情况"
+sec "5. 端口 8567 占用情况"
 if command -v ss >/dev/null 2>&1; then
-  ss -lntp 2>/dev/null | grep ':8000' || echo "  8000 空闲 ✓"
+  ss -lntp 2>/dev/null | grep ':8567' || echo "  8567 空闲 ✓"
 elif command -v netstat >/dev/null 2>&1; then
-  netstat -lntp 2>/dev/null | grep ':8000' || echo "  8000 空闲 ✓"
+  netstat -lntp 2>/dev/null | grep ':8567' || echo "  8567 空闲 ✓"
 else
   echo "  （无 ss / netstat，跳过）"
 fi

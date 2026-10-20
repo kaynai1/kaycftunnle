@@ -114,7 +114,7 @@ if has_image "$IMAGE"; then
 import json, sys, time, urllib.request
 for i in range(20):
     try:
-        with urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2) as r:
+        with urllib.request.urlopen('http://127.0.0.1:8567/api/health', timeout=2) as r:
             d = json.loads(r.read().decode())
             print('health ->', d)
             sys.exit(0 if d.get('ok') else 1)

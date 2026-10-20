@@ -35,7 +35,7 @@ if [ -z "$PULL_POLICY" ]; then
 fi
 
 # 端口：保留上一次的配置，保证幂等
-PORT="8000"
+PORT="8567"
 if [ -f "${ENV_FILE}" ]; then
     OLD_PORT=$(grep -E '^KAY_CFTUNNLE_PORT=' "${ENV_FILE}" | cut -d= -f2)
     [ -n "$OLD_PORT" ] && PORT="$OLD_PORT"

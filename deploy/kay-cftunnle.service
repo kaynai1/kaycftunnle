@@ -8,7 +8,7 @@ Type=simple
 User=cfrun
 Group=cfrun
 WorkingDirectory=/opt/kay-cftunnle
-ExecStart=/usr/bin/python3 /opt/kay-cftunnle/server.py --host 0.0.0.0 --port 8000
+ExecStart=/usr/bin/python3 /opt/kay-cftunnle/server.py --host 0.0.0.0 --port 8567
 Restart=on-failure
 RestartSec=3
 Environment=TZ=Asia/Shanghai

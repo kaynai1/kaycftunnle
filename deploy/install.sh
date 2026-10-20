@@ -21,7 +21,7 @@ APP_NAME=kay-cftunnle
 APP_DIR=${APP_DIR:-/opt/kay-cftunnle}
 APP_USER=${APP_USER:-cfrun}
 PY=${PY:-/usr/bin/python3}
-PORT=${DASHBOARD_PORT:-8000}
+PORT=${DASHBOARD_PORT:-8567}
 SERVICE=/etc/systemd/system/${APP_NAME}.service
 
 info() { echo "[*] $*"; }

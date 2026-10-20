@@ -214,7 +214,7 @@ sh build-fpk.sh --no-image                          # 不动镜像，仅打骨�
 安装后：
 
 - 桌面出现 **Kay-cftunnle** 图标，点开即进入面板（**无登录密码**，`no_auth_run=true`）
-- 默认端口 **8000**，可在应用设置里改
+- 默认端口 **8567**，可在应用设置里改
 - 数据目录：`/vol1/@appdata/kaycftunnle/`
   - `data/` → 容器 `/app/data`（`workbench.json`、SQLite）
   - `runtime/` → 容器 `/app/runtime`（cloudflared 二进制与日志）
@@ -243,7 +243,7 @@ kaycftunnle-1.0.0.fpk
     │   ├── image.tar        # 仅内嵌模式存在
     │   └── IMPORT_IMAGE.txt # 未内嵌时附带的导入指引
     ├── ui/
-    │   ├── config           # 桌面图标入口（url 类型，端口 8000）
+    │   ├── config           # 桌面图标入口（url 类型，端口 8567）
     │   └── images/icon-{64,256}.png
     └── config/
         ├── privilege
@@ -268,7 +268,7 @@ tar -xzOf dist/kaycftunnle-1.0.0.fpk app.tgz | tar -tzf -   # 内层
 最常见原因是镜像不存在：`docker image ls | grep kaycftunnle` 无输出。
 
 **提示端口占用**
-→ 应用设置里改端口，或停掉占用 8000 的服务。`cmd/install_callback` 会把端口写进 `.env`，重启应用即生效。
+→ 应用设置里改端口，或停掉占用 8567 的服务。`cmd/install_callback` 会把端口写进 `.env`，重启应用即生效。
 
 **想重置面板数据**
 → `docker compose down` 后删除 `/vol1/@appdata/kaycftunnle/data/workbench.json`，下次启动会重新播种默认配置（`admin / 123456`）。
@@ -318,7 +318,7 @@ docker ps -a | grep kaycftunnle        # 看容器是否在跑
 docker logs kaycftunnle --tail 50      # 看具体报错
 ```
 
-最常见还是镜像问题或端口 8000 被占用。
+最常见还是镜像问题或端口 8567 被占用。
 
 ### 想彻底免掉「先构建」这一步
 

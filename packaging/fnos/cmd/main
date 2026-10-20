@@ -92,7 +92,7 @@ start)
     fi
 
     if ! compose up -d --remove-orphans >/dev/null 2>&1; then
-        log_err "容器启动失败，请检查 Docker 服务是否运行、端口 8000 是否被占用。"
+        log_err "容器启动失败，请检查 Docker 服务是否运行、端口 8567 是否被占用。"
         log_err "可用  docker logs kaycftunnle --tail 50  查看具体原因。"
         exit 1
     fi

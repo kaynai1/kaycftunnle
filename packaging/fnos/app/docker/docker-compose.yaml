@@ -29,14 +29,14 @@ services:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
       - DASHBOARD_HOST=0.0.0.0
-      - DASHBOARD_PORT=8000
+      - DASHBOARD_PORT=8567
     ports:
-      - "${KAY_CFTUNNLE_PORT:-8000}:8000"
+      - "${KAY_CFTUNNLE_PORT:-8567}:8567"
     volumes:
       - "${KAY_CFTUNNLE_DATA:-/vol1/@appdata/kaycftunnle}/data:/app/data"
       - "${KAY_CFTUNNLE_DATA:-/vol1/@appdata/kaycftunnle}/runtime:/app/runtime"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8567/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3

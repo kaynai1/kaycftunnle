@@ -64,9 +64,9 @@ RUN set -eux; \
     echo "代码自检通过"
 
 # data/、runtime/ 由运行时 volume 挂载提供，不打进镜像
-EXPOSE 8000
+EXPOSE 8567
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8000/api/health || exit 1
+    CMD curl -fsS http://127.0.0.1:8567/api/health || exit 1
 
-CMD ["python", "server.py", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "server.py", "--host", "0.0.0.0", "--port", "8567"]

@@ -27,7 +27,7 @@ sh deploy-kay-cftunnle.sh
 
 脚本自动完成：Docker 探测 → 环境自检 → 定位解压 → 安装（保留已有配置）→ 构建启动 → 自检。
 
-- 访问地址：`http://NAS_IP:8000`
+- 访问地址：`http://NAS_IP:8567`
 - 登录方式：**无密码模式**，浏览器打开即可直接使用（可修改 `data/workbench.json` 中 `panel.no_auth_run` 恢复密码登录）
 - 安装目录：`/vol1/1000/qd/kay-cftunnle`（数据落在这里，容器删了数据还在）
 - 开机自启：Docker 部署已带 `restart: unless-stopped`；systemd 部署已执行 `systemctl enable kay-cftunnle`，NAS 重启后自动启动
@@ -35,8 +35,8 @@ sh deploy-kay-cftunnle.sh
 ### 本地开发（Windows）
 
 ```bash
-python server.py --port 8000     # 或 python3
-# 浏览器打开 http://127.0.0.1:8000
+python server.py --port 8567     # 或 python3
+# 浏览器打开 http://127.0.0.1:8567
 python server.py --check         # 只跑一次自检，打印状态 JSON
 ```
 
@@ -123,7 +123,7 @@ kay-cftunnle/
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `DASHBOARD_HOST` | `0.0.0.0` | 监听地址 |
-| `DASHBOARD_PORT` | `8000` | 监听端口 |
+| `DASHBOARD_PORT` | `8567` | 监听端口 |
 | `DASHBOARD_TZ` | `Asia/Shanghai` | 时区 |
 | `KAY_CFTUNNLE_ROOT` | 源码目录 | 工作台根目录 |
 
@@ -185,7 +185,7 @@ sudo sh deploy/install.sh
 |---|---|
 | 构建卡在 apt | 不是报错，Dockerfile 已换阿里云源；若仍慢可重跑 `docker compose up -d --build` |
 | 构建卡在拉取 cloudflared | Dockerfile 已改用官方 `cloudflare/cloudflared` 镜像多阶段复制，无需访问 GitHub |
-| 打不开页面 | 飞牛「系统设置 → 防火墙」放行 8000 |
+| 打不开页面 | 飞牛「系统设置 → 防火墙」放行 8567 |
 | 页面提示「接口不存在：/xxx」 | 三步定位：① 页面报错处点「运行版本自检」，看 `all_routes_ok`；② `curl http://<NAS>:端口/api/system/selfcheck` 看 `code_sha` 与 `server_mtime`；③ 从容器内确认 `docker exec kay-cftunnle grep -c 'dns-records' /app/server.py`。返回 `0` 说明容器里是旧代码，执行 `cd <安装目录> && docker compose up -d --build --force-recreate`；返回非 `0` 说明代码是新的，强制刷新浏览器缓存（Ctrl+Shift+R）即可 |
 | 页面要求输入密码 | 默认已关闭登录验证；检查 `data/workbench.json` 中 `panel.no_auth_run` 是否为 `true` |
 | 验证提示「Invalid request headers」等 CF 错误码 | Token 无效或权限不足；错误码（6003/7003/10000 等）为 Cloudflare 原文，按提示检查 Token 与权限 |
