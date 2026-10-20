@@ -4,18 +4,19 @@
 #
 # ⚠ 镜像说明（重要）
 #   飞牛在【安装阶段】就会直接 docker compose up，不等 cmd/main。
-#   所以镜像必须在这之前就存在于 NAS 本地，否则报：
+#   所以镜像必须在这之前就存在于 NAS 本地，或者允许联网拉取，否则报：
 #       Error response from daemon: No such image: <镜像名>
 #
-#   本包默认使用本地镜像 kaycftunnle:latest（与项目根 build.sh 默认名一致）。
-#   两种让镜像就位的办法：
-#     1) 在 NAS 上构建：  sudo sh build-on-nas.sh
-#     2) 从 GHCR 拉取：   把 .env 里的 KAY_CFTUNNLE_IMAGE 改成
-#                         ghcr.io/<你的用户名>/kaycftunnle:latest
-#                         （由 .github/workflows/docker.yml 自动构建）
+#   本包默认走 GHCR 远程镜像（build-fpk.sh --image ghcr.io/kaynai1/kaycftunnle:latest）：
+#   env.default 里同时写好镜像名与 KAY_CFTUNNLE_PULL_POLICY=always，
+#   装包时由 compose 自动从 ghcr.io 拉取，NAS 上不需要预先构建。
+#   镜像由 .github/workflows/docker.yml 在推 main 时多架构构建（amd64 + arm64）。
+#
+#   想改成离线内嵌包：在项目根执行 sh packaging/fnos/build-fpk.sh（有 docker 时自动内嵌），
+#   并把 env.default 里的 pull_policy 改回 never。
 #
 #   pull_policy 通过 KAY_CFTUNNLE_PULL_POLICY 控制：
-#     never（默认，本地镜像） / always（GHCR 远程镜像） / missing
+#     never（本地镜像） / always（远程仓库，安装时拉取） / missing
 
 services:
   kaycftunnle:

@@ -9,7 +9,7 @@
 #   1. 在 NAS 上用 docker build 构建 kaycftunnle:latest 镜像
 #   2. docker save 导出镜像
 #   3. 调用 fnpack（自动下载 Linux 版）打包成内嵌镜像的 fpk
-#   4. 产物：dist/kaycftunnle-1.0.0.fpk（约 200-300 MB）
+#   4. 产物：dist/kaycftunnle-<版本>.fpk（约 200-300 MB）
 #
 # 依赖：NAS 上已安装 Docker，且有 curl + tar
 # =============================================================================
@@ -68,7 +68,8 @@ sh "$SCRIPT_DIR/build-fpk.sh" --tar "$TAR_FILE" || {
 }
 
 # ---------------------------------------------------------------- 完成
-FPK="$PROJECT_DIR/dist/kaycftunnle-1.0.0.fpk"
+VERSION=$(grep -E '^version' "$SCRIPT_DIR/manifest" | head -1 | cut -d= -f2 | xargs)
+FPK="$PROJECT_DIR/dist/kaycftunnle-$VERSION.fpk"
 if [ -f "$FPK" ]; then
   FPK_SIZE=$(du -h "$FPK" | cut -f1)
   ok "打包完成: $FPK ($FPK_SIZE)"

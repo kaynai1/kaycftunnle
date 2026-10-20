@@ -1,7 +1,7 @@
 # Kay-cftunnle 部署指南
 
 > 默认账号：`admin` ｜ 默认密码：`123456`  
-> 项目已开启无密码模式，首次打开面板通常无需登录即可使用。如需关闭无密码模式，请修改 `data/workbench.json` 中 `panel.no_auth_run` 为 `false`。
+> 打开面板后需要登录，进去第一件事请到「设置 → 面板密码」改掉默认密码。面板只应暴露在你信任的内网；若要公网可达，请再用 Cloudflare Access 之类加一层。
 
 ---
 
@@ -117,7 +117,7 @@ docker compose up -d --build
 | 连接器一直「启动中 → 已停止」，退出码 **0**，日志里全是 `--token/--url/--help` 这类参数说明 | 那段文字是 `cloudflared tunnel run --help` 的**帮助输出**，不是错误堆栈。cloudflared 只在两种情况下打印它：① 令牌为空（`--token ''`，被当成"没指定隧道"）；② 命令里有 `run` 子命令不认识的参数（例如把 `--protocol` / `--edge-ip-version` / `--no-autoupdate` 写在 `run` 之后）。两种情况都不会真正发起连接。新版已改为「参数放在 `run` 之前 + 被拒时自动降级为官方最小写法 + 启动前校验令牌」，并在日志里打印实际执行的命令（令牌被隐藏）。 |
 | 想确认 cloudflared 到底拿到了什么输出 | 执行 `docker exec kaycftunnle tail -40 /app/runtime/connector.log`。第一行若是 `Incorrect Usage:` / `Usage:` 属于命令与令牌问题；若是 `failed to connect to edge` / `context deadline exceeded` 才是网络问题。 |
 | 连接器能启动但一直连不上 / 超时 | QUIC 走 **UDP 7844**，不少家宽会封 UDP。把连接器协议从 `QUIC` 改成 `http2`（走 TCP 443）再试，成功率通常更高。 |
-| 登录提示密码错误 | 默认密码已改为 `123456`。如果仍失败，检查 `data/workbench.json` 是否已开启无密码模式。 |
+| 忘记登录密码 | 面板改密时会把新密码同步写进 `data/workbench.json` 的 `auth.password`，那里看到的就是当前密码。若数据库损坏，删掉 `data/kay-cftunnle.sqlite3` 再重启，服务会按 `workbench.json` 重新播种管理员（Cloudflare 侧的隧道与 DNS 不受影响，但本地规则缓存需重新拉取）。 |
 
 ---
 

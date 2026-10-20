@@ -3,7 +3,7 @@
 把 Cloudflare Tunnel 的日常操作收进一个自托管 Web 面板：API Token 托管、隧道管理、Ingress 映射、DNS CNAME 维护、cloudflared 连接器控制。**Python 标准库 + SQLite + 原生前端，零第三方运行依赖**，一条命令部署到飞牛 NAS。
 
 > 仅供学习与研究使用。  
-> **默认账号：`admin` ｜ 默认密码：`123456`**（无密码模式开启时首次进入无需登录）
+> **默认账号：`admin` ｜ 默认密码：`123456`**（首次登录后请到「设置 → 面板密码」立即修改）
 
 ## 快速开始
 
@@ -28,7 +28,7 @@ sh deploy-kay-cftunnle.sh
 脚本自动完成：Docker 探测 → 环境自检 → 定位解压 → 安装（保留已有配置）→ 构建启动 → 自检。
 
 - 访问地址：`http://NAS_IP:8567`
-- 登录方式：**无密码模式**，浏览器打开即可直接使用（可修改 `data/workbench.json` 中 `panel.no_auth_run` 恢复密码登录）
+- 登录方式：默认需要登录（`admin` / `123456`），登录后请在「设置 → 面板密码」修改
 - 安装目录：`/vol1/1000/qd/kay-cftunnle`（数据落在这里，容器删了数据还在）
 - 开机自启：Docker 部署已带 `restart: unless-stopped`；systemd 部署已执行 `systemctl enable kay-cftunnle`，NAS 重启后自动启动
 
@@ -63,13 +63,23 @@ cloudflared 运行在 NAS 上可能需要连续不间断。服务端内置看门
 - 达到上限后停止拉起，并在连接器页显示「已停止拉起」，避免死循环刷日志
 - 用户手动「停止」不会触发看门狗；手动「启动 / 重启」会重置重试计数与退出记录
 
+## 一条规则怎么才算通
+
+域名要能打开需要三件事同时成立，面板把前两项的缺失都标在规则行上：
+
+1. **隧道路由（Ingress）**：写入 Cloudflare 的 `cfd_tunnel/{id}/configurations`，形如 `hostname → http://127.0.0.1:5678`；每条隧道的规则列表末尾自动补 `http_status:404` 兜底。缺了它，请求到边缘就报 502/1033。
+2. **DNS CNAME**：`子域名 → <隧道ID>.cfargotunnel.com`，且必须开启橙色云（代理）。缺了它，域名根本不进 Cloudflare 网络。
+3. **连接器在跑**：`cloudflared tunnel run --token <令牌>` 连上这条隧道（隧道页状态为 active）。缺了它，边缘找不到回源出口。
+
+隧道一律用 `config_src=cloudflare`（远程托管）创建，所以只需要 `--token` 启动，路由由面板通过 API 下发，NAS 上不需要任何本地 `config.yml`。
+
 ## API 一览（均需登录；业务错误返回 HTTP 200 + `{ok:false}`）
 
 | 方法与路径 | 用途 |
 |---|---|
 | `GET /api/health` | 存活探活（无需登录） |
-| `POST /api/auth/login` · `POST /api/auth/logout` · `GET /api/auth/me` | 登录 / 登出 / 当前用户（默认无密码模式直接通过） |
-| `POST /api/auth/password` | 修改密码（界面已随无密码模式移除，接口仅在 `no_auth_run=false` 时生效） |
+| `POST /api/auth/login` · `POST /api/auth/logout` · `GET /api/auth/me` | 登录 / 登出 / 当前用户 |
+| `POST /api/auth/password` | 修改密码（改密后所有会话失效，需用新密码重新登录；设置页「面板密码」卡片已接入） |
 | `GET /api/cloudflare/status` | 凭据状态（Token 脱敏显示） |
 | `POST /api/cloudflare/settings` | 保存 Token / Account ID |
 | `POST /api/cloudflare/verify` | 测试配置，返回结构化报告（Token/账号/权限） |
@@ -82,7 +92,8 @@ cloudflared 运行在 NAS 上可能需要连续不间断。服务端内置看门
 | `GET /api/tunnels` · `POST /api/tunnels` | 隧道列表 / 新建（名称：小写字母数字连字符，1-63 位） |
 | `DELETE /api/tunnels/{id}` | 删除隧道（有活跃连接时 Cloudflare 会拒绝，先停止连接器） |
 | `GET /api/tunnels/{id}/token` | 获取隧道连接令牌（敏感凭据，等同密码） |
-| `GET /api/ingresses` · `POST /api/ingresses` | Ingress 规则列表 / 创建（自动同步 CNAME） |
+| `GET /api/ingresses` · `POST /api/ingresses` | Ingress 规则列表 / 创建（写隧道路由 + 同步 CNAME） |
+| `POST /api/ingresses/sync` | 把本地规则整份重新下发到各隧道的远程路由 |
 | `POST /api/ingresses/{id}` | 编辑规则（改服务地址 / 换隧道；DNS 用 PUT 原地更新） |
 | `DELETE /api/ingresses/{id}` | 删除规则并清理 Cloudflare DNS 记录 |
 | `GET /api/cloudflare/dns-records` | 当前 Zone 全部 DNS 记录，标注哪些由面板维护 |
@@ -187,10 +198,12 @@ sudo sh deploy/install.sh
 | 构建卡在拉取 cloudflared | Dockerfile 已改用官方 `cloudflare/cloudflared` 镜像多阶段复制，无需访问 GitHub |
 | 打不开页面 | 飞牛「系统设置 → 防火墙」放行 8567 |
 | 页面提示「接口不存在：/xxx」 | 三步定位：① 页面报错处点「运行版本自检」，看 `all_routes_ok`；② `curl http://<NAS>:端口/api/system/selfcheck` 看 `code_sha` 与 `server_mtime`；③ 从容器内确认 `docker exec kay-cftunnle grep -c 'dns-records' /app/server.py`。返回 `0` 说明容器里是旧代码，执行 `cd <安装目录> && docker compose up -d --build --force-recreate`；返回非 `0` 说明代码是新的，强制刷新浏览器缓存（Ctrl+Shift+R）即可 |
-| 页面要求输入密码 | 默认已关闭登录验证；检查 `data/workbench.json` 中 `panel.no_auth_run` 是否为 `true` |
+| 想在本机开发时免登录 | 把 `data/workbench.json` 里 `panel.no_auth_run` 改成 `true` 并重启服务（出厂默认 `false`，NAS 上不要开：任何能访问端口的人都能读到 Token） |
 | 验证提示「Invalid request headers」等 CF 错误码 | Token 无效或权限不足；错误码（6003/7003/10000 等）为 Cloudflare 原文，按提示检查 Token 与权限 |
 | 连接器页显示「未安装」 | cloudflared 二进制不在 PATH 中；Docker 部署已内置，本地开发请下载并放到 PATH 或项目根目录 |
 | 启动连接器提示「未找到 cloudflared」 | 同上；Windows 请把 `cloudflared.exe` 放在项目根目录或加入系统 PATH |
 | NAS 重启后面板没自动启动 | Docker 路线检查 `restart: unless-stopped` 是否生效；systemd 路线执行 `systemctl status kay-cftunnle` |
 | 连接器频繁自动重启 | 看连接器页「最近异常退出」里的退出码与日志尾部原因；连续 5 次失败后看门狗会停止拉起，修复后手动「重启」即可重置 |
 | Ingress 规则显示「DNS 已缺失」 | 该子域名在 Cloudflare 上的 CNAME 被手工删除或改名；直接用「编辑」保存一次，或删除重建即可补回 |
+| 规则齐全但域名打不开（502 / 1033 / Unable to reach origin） | 只有 CNAME 不够，隧道还要有自己的 ingress 路由。看规则上的「路由未下发」标记，点「↻ 重新下发路由」补写 |
+| 连接器报 `flag provided but not defined: -edge-ip-version` | 容器里跑的是旧代码：`--protocol` / `--edge-ip-version` 属于 `tunnel` 全局参数，必须放在子命令 `run` **之前**。执行 `docker compose up -d --build --force-recreate` 后在「系统设置 → 运行版本自检」确认 `version` ≥ 1.2.0 且 `tunnel_route_sync` 为 true |

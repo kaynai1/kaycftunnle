@@ -161,9 +161,36 @@ info "镜像拉取策略: $PULL_POLICY_DESC"
 
 # 未内嵌镜像时，往包里塞一份安装说明，用户解包就能看到该干什么
 if [ "$EMBED_IMAGE" != "yes" ]; then
-  warn "本次未内嵌镜像：必须在装包【之前】让 NAS 上有 $IMAGE_NAME"
-  warn "在 NAS 终端执行  docker image ls | grep kaycftunnle  可确认"
-  cat > "$BUILD_DIR/app/docker/IMPORT_IMAGE.txt" <<EOF
+  case "$IMAGE_NAME" in
+    */*)
+      # 远程仓库镜像（GHCR）：靠 pull_policy=always 在安装时拉取
+      warn "本次未内嵌镜像，包体约 70K；安装时 compose 会从 $IMAGE_NAME 联网拉取"
+      cat > "$BUILD_DIR/app/docker/IMPORT_IMAGE.txt" <<EOF
+本安装包不内嵌镜像，安装时由 docker compose 自动从远程仓库拉取：
+
+    ${IMAGE_NAME}
+
+env.default 已写好 KAY_CFTUNNLE_PULL_POLICY=always，所以飞牛点「安装」时
+会先联网 pull，再 up。要求：
+
+  1. NAS 能访问 ghcr.io（国内网络可能需要给 Docker 配代理）
+  2. 该 GHCR 包必须设为 Public，否则匿名 pull 会报 unauthorized：
+     GitHub → 个人主页 → Packages → kaycftunnle → Package settings → Change visibility → Public
+
+装前可在 NAS 终端自测一条命令，能拉下来就一定能装：
+
+    docker pull ${IMAGE_NAME}
+
+若确认拉取失败，两个退路：
+  ① 手动拉好后改成内嵌包：docker save ${IMAGE_NAME} -o kaycftunnle.tar
+     然后 sh build-fpk.sh --tar kaycftunnle.tar
+  ② 直接在 NAS 上构建：sudo sh fix-image.sh（会 retag 或重新 build）
+EOF
+      ;;
+    *)
+      warn "本次未内嵌镜像：必须在装包【之前】让 NAS 上有 $IMAGE_NAME"
+      warn "在 NAS 终端执行  docker image ls | grep kaycftunnle  可确认"
+      cat > "$BUILD_DIR/app/docker/IMPORT_IMAGE.txt" <<EOF
 本安装包【未内嵌】Docker 镜像。
 飞牛在安装阶段就会直接 docker compose up，镜像不在本地会报：
     Error response from daemon: No such image: ${IMAGE_NAME}
@@ -205,7 +232,7 @@ if [ "$EMBED_IMAGE" != "yes" ]; then
     docker build -t ${IMAGE_NAME} .         # 重新构建
 
 ====================== 第三步：安装 ======================
-飞牛应用中心 → 手动安装 → 选 kaycftunnle-1.0.0.fpk
+飞牛应用中心 → 手动安装 → 选 dist/kaycftunnle-${VERSION}.fpk
 
 ====================== 备选：在电脑上构建后导入 NAS ======================
     docker build -t ${IMAGE_NAME} .
@@ -221,7 +248,7 @@ if [ "$EMBED_IMAGE" != "yes" ]; then
     sudo sh packaging/fnos/build-image-on-nas.sh
 
 脚本会自动：docker build → docker save → fnpack 打包，
-产物 dist/kaycftunnle-1.0.0.fpk 约 200-300MB，装到飞牛上直接能用。
+产物 dist/kaycftunnle-${VERSION}.fpk 约 200-300MB，装到飞牛上直接能用。
 
 如果你的 NAS 无法下载 fnpack（需要访问 static2.fnnas.com），
 可以只在 NAS 构建并导出 tar：
@@ -233,6 +260,8 @@ if [ "$EMBED_IMAGE" != "yes" ]; then
 compose 里已配置  pull_policy: never ，且 cmd/main 不含任何 pull 动作，
 所以缺镜像时只会明确报错，不会卡在 registry-1.docker.io 超时上。
 EOF
+      ;;
+  esac
 fi
 
 # ---------------------------------------------------------------- 校验

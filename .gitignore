@@ -24,3 +24,6 @@ Thumbs.db
 *.env
 .env
 kaycftunnle.bundle
+
+# Windows 本地开发下载的连接器二进制
+cloudflared.exe
