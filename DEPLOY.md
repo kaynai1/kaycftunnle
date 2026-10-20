@@ -114,7 +114,8 @@ docker compose up -d --build
 | `No such image: kaycftunnle:latest` | 说明你安装的 fpk 是轻量版，没有内嵌镜像。请改用方式二在 NAS 上重新打包。 |
 | `context deadline exceeded` / Docker Hub 超时 | Dockerfile 默认从 Docker Hub 拉取基础镜像，网络不佳时会超时。可在 NAS 上先 `docker pull` 国内镜像，再构建；或换用方式一直接拉取 GHCR 镜像。 |
 | 打不开 8567 端口 | 检查 NAS 防火墙 / 安全组是否放行 8567 端口。 |
-| 连接器一直「启动中 → 已停止」，退出码 **0** | cloudflared 打印了 `tunnel run` 的用法说明就退出，说明它没拿到有效令牌（`--token` 为空、隧道已被删除、或 API Token 缺少 Cloudflare Tunnel 权限）。新版会在启动前校验并直接提示原因。 |
+| 连接器一直「启动中 → 已停止」，退出码 **0**，日志里全是 `--token/--url/--help` 这类参数说明 | 那段文字是 `cloudflared tunnel run --help` 的**帮助输出**，不是错误堆栈。cloudflared 只在两种情况下打印它：① 令牌为空（`--token ''`，被当成"没指定隧道"）；② 命令里有 `run` 子命令不认识的参数（例如把 `--protocol` / `--edge-ip-version` / `--no-autoupdate` 写在 `run` 之后）。两种情况都不会真正发起连接。新版已改为「参数放在 `run` 之前 + 被拒时自动降级为官方最小写法 + 启动前校验令牌」，并在日志里打印实际执行的命令（令牌被隐藏）。 |
+| 想确认 cloudflared 到底拿到了什么输出 | 执行 `docker exec kaycftunnle tail -40 /app/runtime/connector.log`。第一行若是 `Incorrect Usage:` / `Usage:` 属于命令与令牌问题；若是 `failed to connect to edge` / `context deadline exceeded` 才是网络问题。 |
 | 连接器能启动但一直连不上 / 超时 | QUIC 走 **UDP 7844**，不少家宽会封 UDP。把连接器协议从 `QUIC` 改成 `http2`（走 TCP 443）再试，成功率通常更高。 |
 | 登录提示密码错误 | 默认密码已改为 `123456`。如果仍失败，检查 `data/workbench.json` 是否已开启无密码模式。 |
 

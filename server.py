@@ -292,15 +292,29 @@ class ConnectorManager:
         except Exception:
             return 0
 
-    def _read_logs(self, tail: int = 50) -> List[str]:
+    def _read_logs(self, tail: int = 50, start: int = 0) -> List[str]:
         try:
             if not self.log_path.exists():
                 return []
             with open(self.log_path, "r", encoding="utf-8", errors="replace") as fh:
                 lines = fh.readlines()
-            return [line.rstrip("\n") for line in lines[-tail:]]
+            if start:
+                lines = lines[start:]
+            else:
+                lines = lines[-tail:]
+            return [line.rstrip("\n") for line in lines]
         except Exception:
             return []
+
+    def _log_line_count(self) -> int:
+        """当前日志行数，用作「本次启动输出」的起点标记。"""
+        try:
+            if not self.log_path.exists():
+                return 0
+            with open(self.log_path, "r", encoding="utf-8", errors="replace") as fh:
+                return len(fh.readlines())
+        except Exception:
+            return 0
 
     def _resolve_tunnel(self, tunnel_id: str = "") -> Tuple[Optional[str], Optional[str]]:
         """确定要启动的隧道：参数 > 配置默认 > 第一个可用隧道。"""
@@ -363,26 +377,27 @@ class ConnectorManager:
                                               "疑似 API 返回的不是令牌本身" % token[:12]}
 
             conn_cfg = self.cfg.get("connector", {})
-            protocol = str(conn_cfg.get("protocol", "http2") or "http2").strip().lower()
-            if protocol not in ("quic", "http2"):
-                protocol = "http2"
-            ip_version = str(conn_cfg.get("ip_version", "ipv4") or "ipv4").strip().lower()
+            # 只有用户「显式配置过」才追加协议参数。
+            # 默认走官方最小写法 cloudflared tunnel --no-autoupdate run --token <T>，
+            # 这条命令所有 cloudflared 版本都认，跟开源 compose 里写的一模一样。
+            raw_protocol = str(conn_cfg.get("protocol", "") or "").strip().lower()
+            protocol = raw_protocol if raw_protocol in ("quic", "http2") else "http2"
+            raw_ip = str(conn_cfg.get("ip_version", "") or "").strip().lower()
+            ip_version = raw_ip if raw_ip in ("ipv4", "ipv6", "auto") else "ipv4"
             # auto 交给 cloudflared 自己判断，不要再被当成 IPv6
             edge_ip = {"ipv4": "4", "ipv6": "6"}.get(ip_version, "auto")
+
+            opt_flags = []
+            if raw_protocol in ("quic", "http2"):
+                opt_flags += ["--protocol", protocol]
+            if raw_ip in ("ipv4", "ipv6", "auto"):
+                opt_flags += ["--edge-ip-version", edge_ip]
 
             self._ensure_runtime_dir()
             # 清空旧日志或追加？选择追加更利于排查，但启动时截尾保留最近 500 行
             self._rotate_log()
             log_fh = open(self.log_path, "a", encoding="utf-8", errors="replace")
 
-            # 参数顺序遵循官方 Docker 用法 `tunnel --no-autoupdate ... run --token`：
-            # --protocol / --edge-ip-version / --no-autoupdate 都是全局参数，
-            # 必须放在子命令 run 之前，放到 run 之后在部分 cloudflared 版本上会被判为未知参数，
-            # cloudflared 会打印用法说明并以退出码 0 退出（同样表现为秒退）。
-            cmd = [binary, "tunnel", "--no-autoupdate",
-                   "--protocol", protocol,
-                   "--edge-ip-version", edge_ip,
-                   "run", "--token", token]
             kwargs: Dict[str, Any] = {
                 "stdout": log_fh,
                 "stderr": subprocess.STDOUT,
@@ -393,18 +408,81 @@ class ConnectorManager:
                 kwargs["startupinfo"] = subprocess.STARTUPINFO()  # type: ignore[attr-defined]
                 kwargs["startupinfo"].dwFlags |= subprocess.STARTF_USESHOWWINDOW  # type: ignore[attr-defined]
 
-            try:
-                self.proc = subprocess.Popen(cmd, **kwargs)
-            except Exception as exc:
-                log_fh.close()
-                return {"ok": False, "error": "启动 cloudflared 失败：" + str(exc)}
+            # 候选命令：
+            #   1) 按配置带上协议参数（全局参数必须在子命令 run 之前，否则被判未知参数）
+            #   2) 官方最小写法，兜底所有版本差异
+            # 第 1 条秒退且原因是参数类错误时，自动降级到第 2 条再试一次。
+            candidates = []
+            if opt_flags:
+                candidates.append([binary, "tunnel", "--no-autoupdate"]
+                                  + opt_flags + ["run", "--token", token])
+            candidates.append([binary, "tunnel", "--no-autoupdate", "run", "--token", token])
 
-            # 记录句柄，停止时关闭，避免每次重启泄漏一个文件描述符
-            self._log_fh = log_fh
+            last_error = ""
+            for attempt, cmd in enumerate(candidates):
+                if attempt > 0:
+                    log_fh.write("\n--- 上一个启动参数被拒绝，改用官方最小写法重试 ---\n")
+                    log_fh.flush()
+                    add_log("connector", "启动参数不被接受，自动降级为最小写法重试")
+                add_log("connector", "执行：" + self._mask_cmd(cmd))
+                # 记录本次启动前的日志行数，判定退出原因时只看这之后的新输出
+                self._log_offset = self._log_line_count()
 
-            self.started_at = time.time()
-            self._proc_started_at = self.started_at
-            self.current_tunnel_id = resolved
+                try:
+                    self.proc = subprocess.Popen(cmd, **kwargs)
+                    self._log_fh = log_fh
+                except Exception as exc:
+                    last_error = "启动 cloudflared 失败：" + str(exc)
+                    log_fh.write(last_error + "\n")
+                    log_fh.flush()
+                    self.proc = None
+                    continue
+
+                self.started_at = time.time()
+                self._proc_started_at = self.started_at
+                self.current_tunnel_id = resolved
+
+                # 启动后短暂观察：cloudflared 参数不被接受、令牌无效时会在 1 秒内退出。
+                # 以前直接返回 ok=True，界面停在「启动中…」，只有等看门狗下一轮才发现已经死了，
+                # 用户看到的只是「秒退 + 无限重试」，完全不知道原因。这里立刻把真实原因返回。
+                early = self._wait_early_exit(1.5)
+                if not early:
+                    break  # 起来了，跳出重试循环
+
+                rc, reason, fatal = early
+                last_error = "cloudflared 启动后立即退出（退出码 %s）：%s" % (rc, reason)
+                add_log("connector", last_error, "error")
+                self._exit_info = {
+                    "exit_code": rc,
+                    "exit_at": int(time.time()),
+                    "uptime": 0,
+                    "tunnel_id": resolved,
+                    "reason": reason,
+                }
+
+                if not fatal:
+                    # 网络类问题：保留 proc 交给看门狗按退避继续重试
+                    return {"ok": False, "error": last_error}
+
+                # 参数/令牌类错误：这一轮参数组合被拒绝，还有备选就换一套再试
+                self.proc = None
+                self._clear_pid()
+                self.current_tunnel_id = ""
+                if attempt + 1 < len(candidates):
+                    continue
+                # 已经是最后一套参数：重试多少次结果都一样，直接放弃并保留原因，
+                # 避免看门狗 5 次无意义重试把日志刷满、还让界面一直"重试中"
+                self._close_log_fh()
+                self._exit_info["give_up"] = True
+                return {"ok": False, "error": last_error}
+
+            if self.proc is None:
+                # 全部候选都失败
+                self._close_log_fh()
+                if self._exit_info:
+                    self._exit_info["give_up"] = True
+                return {"ok": False, "error": last_error or "cloudflared 启动失败"}
+
             if not auto:
                 self._retry_count = 0
                 self._exit_info = {}
@@ -417,32 +495,6 @@ class ConnectorManager:
             add_log("connector", "启动隧道 %s（%s / %s）%s"
                     % (resolved[:8], protocol, ip_label, "· 自动重试第 %d 次" % self._retry_count if auto and self._retry_count else ""))
 
-            # 启动后短暂观察：cloudflared 参数不被接受、令牌无效时会在 1 秒内退出。
-            # 以前直接返回 ok=True，界面停在「启动中…」，只有等看门狗下一轮才发现已经死了，
-            # 用户看到的只是「秒退 + 无限重试」，完全不知道原因。这里立刻把真实原因返回。
-            early = self._wait_early_exit(1.5)
-            if early:
-                rc, reason, fatal = early
-                msg = "cloudflared 启动后立即退出（退出码 %s）：%s" % (rc, reason)
-                add_log("connector", msg, "error")
-                self._exit_info = {
-                    "exit_code": rc,
-                    "exit_at": int(time.time()),
-                    "uptime": 0,
-                    "tunnel_id": resolved,
-                    "reason": reason,
-                }
-                if fatal:
-                    # 令牌/参数类错误：重试多少次结果都一样，直接放弃并保留原因，
-                    # 避免看门狗 5 次无意义重试把日志刷满、还让界面一直"重试中"
-                    self.proc = None
-                    self._close_log_fh()
-                    self._clear_pid()
-                    self.current_tunnel_id = ""
-                    self._exit_info["give_up"] = True
-                # 非致命（网络类）保留 self.proc，交给看门狗按退避继续重试
-                return {"ok": False, "error": msg}
-
             return {
                 "ok": True,
                 "pid": self.proc.pid,
@@ -450,6 +502,21 @@ class ConnectorManager:
                 "protocol": protocol,
                 "ip_version": ip_version,
             }
+
+    @staticmethod
+    def _mask_cmd(cmd) -> str:
+        """把命令行拼成可读字符串，隐藏令牌正文，避免日志泄漏。"""
+        out = []
+        hide_next = False
+        for part in cmd:
+            if hide_next:
+                out.append("<TOKEN:%d 字符>" % len(str(part)))
+                hide_next = False
+                continue
+            out.append(str(part))
+            if str(part) == "--token":
+                hide_next = True
+        return " ".join(out)
 
     def _wait_early_exit(self, seconds: float):
         """观察 seconds 秒；若进程提前退出，返回 (退出码, 原因, 是否致命)，否则返回 None。"""
@@ -469,7 +536,8 @@ class ConnectorManager:
     def _exit_reason(self) -> Tuple[str, bool]:
         """返回 (可读原因, 是否属于「重试也没用」的配置性错误)。"""
         try:
-            lines = self._read_logs(40)
+            # 只看「本次启动」之后新写入的输出，避免上一轮/上一天的日志误导判断
+            lines = self._read_logs(start=int(getattr(self, "_log_offset", 0) or 0))
         except Exception:
             lines = []
         joined = "\n".join(lines).lower()
