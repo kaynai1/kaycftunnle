@@ -7,25 +7,22 @@
 #   所以镜像必须在这之前就存在于 NAS 本地，或者允许联网拉取，否则报：
 #       Error response from daemon: No such image: <镜像名>
 #
-#   本包默认走 GHCR 远程镜像（build-fpk.sh --image ghcr.io/kaynai1/kaycftunnle:latest）：
-#   env.default 里同时写好镜像名与 KAY_CFTUNNLE_PULL_POLICY=always，
-#   装包时由 compose 自动从 ghcr.io 拉取，NAS 上不需要预先构建。
-#   镜像由 .github/workflows/docker.yml 在推 main 时多架构构建（amd64 + arm64）。
+#   镜像名与 pull_policy 由 build-fpk.sh 在打包时直接写入本文件（见下方占位符）。
+#   不能依赖 .env：飞牛在【安装阶段】就会 compose up，此时 .env 可能还没生成；
+#   升级时还可能是上一次安装残留的旧镜像名。
+#   远程镜像由 .github/workflows/docker.yml 在推 main 时多架构构建（amd64 + arm64）。
 #
 #   想改成离线内嵌包：在项目根执行 sh packaging/fnos/build-fpk.sh（有 docker 时自动内嵌），
-#   并把 env.default 里的 pull_policy 改回 never。
-#
-#   pull_policy 通过 KAY_CFTUNNLE_PULL_POLICY 控制：
-#     never（本地镜像） / always（远程仓库，安装时拉取） / missing
+#   脚本会把这里的镜像名换成本地镜像并写入 pull_policy: never。
 
 services:
   kaycftunnle:
-    image: ${KAY_CFTUNNLE_IMAGE:-kaycftunnle:latest}
+    image: __KAY_CFTUNNLE_IMAGE__
     container_name: kaycftunnle
     restart: unless-stopped
     # 容器内需要拉起 cloudflared 子进程并管理隧道，init 负责收信号与回收僵尸进程
     init: true
-    pull_policy: ${KAY_CFTUNNLE_PULL_POLICY:-never}
+    pull_policy: __KAY_CFTUNNLE_PULL_POLICY__
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1

@@ -8,6 +8,8 @@
 #   sh build-fpk.sh --image <仓库/镜像:tag>     # 指定镜像名且不内嵌（已推到仓库时用）
 #   sh build-fpk.sh --tar <镜像.tar>           # 使用已导出的镜像 tar 内嵌进包
 #   sh build-fpk.sh --no-image                 # 完全不处理镜像，只打应用骨架（仅调试）
+#   sh build-fpk.sh --src-overlay --image ghcr.io/kaynai1/kaycftunnle:latest
+#                                              # 测试包：基础镜像 + 当前源码绑定覆盖，无需重建镜像
 #
 # 产物：dist/kaycftunnle-<版本>.fpk
 #
@@ -42,6 +44,7 @@ FNPACK="$FNPACK_DIR/$FNPACK_BASENAME"
 IMAGE_NAME="kaycftunnle:latest"
 IMAGE_TAR=""
 EMBED_IMAGE="auto"
+SRC_OVERLAY="no"
 
 info() { printf '\033[32m[*]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[!]\033[0m %s\n' "$*" >&2; }
@@ -54,7 +57,8 @@ while [ $# -gt 0 ]; do
     --tar)     IMAGE_TAR="$2"; EMBED_IMAGE="tar"; shift 2 ;;
     --no-embed) EMBED_IMAGE="no"; shift ;;
     --no-image) EMBED_IMAGE="skip"; shift ;;
-    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
+    --src-overlay) SRC_OVERLAY="yes"; shift ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     *) err "未知参数: $1"; exit 1 ;;
   esac
 done
@@ -140,23 +144,37 @@ skip)
   ;;
 esac
 
-# 写入镜像名到 .env 模板
-cat > "$BUILD_DIR/app/docker/env.default" <<EOF
-KAY_CFTUNNLE_IMAGE=${IMAGE_NAME}
-EOF
-
 # 远程仓库镜像（GHCR / 私有仓库）需要允许拉取；本地镜像则禁止拉取避免超时
 case "$IMAGE_NAME" in
   */*)
     # 形如 ghcr.io/user/kaycftunnle:latest —— 带斜杠说明是远程仓库
-    echo "KAY_CFTUNNLE_PULL_POLICY=always" >> "$BUILD_DIR/app/docker/env.default"
+    PULL_POLICY="always"
     PULL_POLICY_DESC="always（远程仓库，安装时自动拉取）"
     ;;
   *)
-    echo "KAY_CFTUNNLE_PULL_POLICY=never" >> "$BUILD_DIR/app/docker/env.default"
+    PULL_POLICY="never"
     PULL_POLICY_DESC="never（本地镜像，不联网拉取）"
     ;;
 esac
+
+# 源码覆盖测试包复用 NAS 上已有的基础镜像，缺失时才拉取
+if [ "$SRC_OVERLAY" = "yes" ] && [ "$PULL_POLICY" = "always" ]; then
+  PULL_POLICY="missing"
+  PULL_POLICY_DESC="missing（优先本地基础镜像，缺失时才拉取）"
+fi
+
+# 写入镜像名到 .env 模板
+cat > "$BUILD_DIR/app/docker/env.default" <<EOF
+KAY_CFTUNNLE_IMAGE=${IMAGE_NAME}
+KAY_CFTUNNLE_PULL_POLICY=${PULL_POLICY}
+EOF
+
+# 镜像名直接写进 compose：安装阶段飞牛就会 compose up，此时 .env 可能还没生成，
+# 升级时 .env 还可能残留旧版本写下的本地镜像名，不能依赖环境变量。
+COMPOSE_FILE="$BUILD_DIR/app/docker/docker-compose.yaml"
+grep -q '__KAY_CFTUNNLE_IMAGE__' "$COMPOSE_FILE" \
+  || { err "compose 模板缺少 __KAY_CFTUNNLE_IMAGE__ 占位符"; exit 1; }
+sed -i "s|__KAY_CFTUNNLE_IMAGE__|${IMAGE_NAME}|g; s|__KAY_CFTUNNLE_PULL_POLICY__|${PULL_POLICY}|g" "$COMPOSE_FILE"
 info "镜像拉取策略: $PULL_POLICY_DESC"
 
 # 未内嵌镜像时，往包里塞一份安装说明，用户解包就能看到该干什么
@@ -170,8 +188,8 @@ if [ "$EMBED_IMAGE" != "yes" ]; then
 
     ${IMAGE_NAME}
 
-env.default 已写好 KAY_CFTUNNLE_PULL_POLICY=always，所以飞牛点「安装」时
-会先联网 pull，再 up。要求：
+compose 里已直接写好镜像名与 pull_policy: ${PULL_POLICY}，飞牛点「安装」时
+会先准备镜像，再 up（不依赖安装阶段可能还不存在的 .env）。要求：
 
   1. NAS 能访问 ghcr.io（国内网络可能需要给 Docker 配代理）
   2. 该 GHCR 包必须设为 Public，否则匿名 pull 会报 unauthorized：
@@ -262,6 +280,44 @@ compose 里已配置  pull_policy: never ，且 cmd/main 不含任何 pull 动�
 EOF
       ;;
   esac
+fi
+
+# ---------------------------------------------------------------- 源码覆盖（测试包）
+if [ "$SRC_OVERLAY" = "yes" ]; then
+  info "源码覆盖模式：把当前源码挂载进基础镜像，无需重建镜像"
+  mkdir -p "$BUILD_DIR/app/docker/appsrc/static"
+  cp -f "$PROJECT_DIR/server.py" "$BUILD_DIR/app/docker/appsrc/server.py"
+  cp -f "$PROJECT_DIR/cf.py" "$BUILD_DIR/app/docker/appsrc/cf.py"
+  (cd "$PROJECT_DIR/static" && tar -cf - .) | (cd "$BUILD_DIR/app/docker/appsrc/static" && tar -xf -)
+  for f in appsrc/server.py appsrc/cf.py appsrc/static/index.html appsrc/static/app.js; do
+    [ -f "$BUILD_DIR/app/docker/$f" ] || { err "源码覆盖缺少 $f"; exit 1; }
+  done
+  COMPOSE_FILE="$BUILD_DIR/app/docker/docker-compose.yaml"
+  awk '
+    { print }
+    /^    volumes:$/ {
+      print "      # 测试包专用：用当前源码覆盖镜像内入口与静态目录"
+      print "      - type: bind"
+      print "        source: ./appsrc/server.py"
+      print "        target: /app/server.py"
+      print "        read_only: true"
+      print "        bind:"
+      print "          create_host_path: false"
+      print "      - type: bind"
+      print "        source: ./appsrc/cf.py"
+      print "        target: /app/cf.py"
+      print "        read_only: true"
+      print "        bind:"
+      print "          create_host_path: false"
+      print "      - type: bind"
+      print "        source: ./appsrc/static"
+      print "        target: /app/static"
+      print "        read_only: true"
+      print "        bind:"
+      print "          create_host_path: false"
+    }
+  ' "$COMPOSE_FILE" > "$COMPOSE_FILE.tmp"
+  mv -f "$COMPOSE_FILE.tmp" "$COMPOSE_FILE"
 fi
 
 # ---------------------------------------------------------------- 校验

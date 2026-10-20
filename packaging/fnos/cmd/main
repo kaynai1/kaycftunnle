@@ -18,11 +18,12 @@ log_err() {
 }
 
 compose() {
-    # 优先用 docker compose 插件，其次 docker-compose
+    # 必须和飞牛安装阶段使用同一个项目名（kaycftunnle），否则 stop/start 会操作
+    # 另一个项目（默认目录名 docker），容器同名冲突或旧容器停不掉。
     if docker compose version >/dev/null 2>&1; then
-        docker compose -f "${COMPOSE_DIR}/docker-compose.yaml" --env-file "${COMPOSE_DIR}/.env" "$@"
+        docker compose -p kaycftunnle -f "${COMPOSE_DIR}/docker-compose.yaml" --env-file "${COMPOSE_DIR}/.env" "$@"
     else
-        docker-compose -f "${COMPOSE_DIR}/docker-compose.yaml" --env-file "${COMPOSE_DIR}/.env" "$@"
+        docker-compose -p kaycftunnle -f "${COMPOSE_DIR}/docker-compose.yaml" --env-file "${COMPOSE_DIR}/.env" "$@"
     fi
 }
 

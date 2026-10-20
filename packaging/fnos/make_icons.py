@@ -3,7 +3,7 @@
 设计：深色圆角底 + Cloudflare 橙渐变隧道洞口 + 穿透的光带，
       表达「cloudflared 隧道把外部流量引入内网」。
 输出：packaging/fnos/ICON.PNG (64x64)、ICON_256.PNG (256x256)
-     以及 app/ui/images/icon-64.png、icon-256.png
+     以及 app/ui/images/icon_64.png、icon_256.png
 """
 
 import math
@@ -136,8 +136,8 @@ def main():
     targets = [
         (OUT / "ICON.PNG", 64),
         (OUT / "ICON_256.PNG", 256),
-        (OUT / "app" / "ui" / "images" / "icon-64.png", 64),
-        (OUT / "app" / "ui" / "images" / "icon-256.png", 256),
+        (OUT / "app" / "ui" / "images" / "icon_64.png", 64),
+        (OUT / "app" / "ui" / "images" / "icon_256.png", 256),
     ]
     cache = {}
     for path, size in targets:

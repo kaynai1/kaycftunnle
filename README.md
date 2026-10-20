@@ -3,7 +3,8 @@
 把 Cloudflare Tunnel 的日常操作收进一个自托管 Web 面板：API Token 托管、隧道管理、Ingress 映射、DNS CNAME 维护、cloudflared 连接器控制。**Python 标准库 + SQLite + 原生前端，零第三方运行依赖**，一条命令部署到飞牛 NAS。
 
 > 仅供学习与研究使用。  
-> **默认账号：`admin` ｜ 默认密码：`123456`**（首次登录后请到「设置 → 面板密码」立即修改）
+> **默认免密进入：打开面板即管理员视图，无需登录**（旧配置升级后会一次性迁移到免密）。  
+> 面板持有 Cloudflare Token 权限：若面板可能被公网访问，请到「设置 → 访问保护」关闭免密并设置密码。默认账号 `admin` / 默认密码 `123456`。
 
 ## 快速开始
 
@@ -28,7 +29,7 @@ sh deploy-kay-cftunnle.sh
 脚本自动完成：Docker 探测 → 环境自检 → 定位解压 → 安装（保留已有配置）→ 构建启动 → 自检。
 
 - 访问地址：`http://NAS_IP:8567`
-- 登录方式：默认需要登录（`admin` / `123456`），登录后请在「设置 → 面板密码」修改
+- 登录方式：默认免密（打开即进入）；需要登录时到「设置 → 访问保护」关闭免密，再用 `admin` / `123456` 登录并修改密码
 - 安装目录：`/vol1/1000/qd/kay-cftunnle`（数据落在这里，容器删了数据还在）
 - 开机自启：Docker 部署已带 `restart: unless-stopped`；systemd 部署已执行 `systemctl enable kay-cftunnle`，NAS 重启后自动启动
 
@@ -40,18 +41,15 @@ python server.py --port 8567     # 或 python3
 python server.py --check         # 只跑一次自检，打印状态 JSON
 ```
 
-## 三步跑通（总览页「开始使用」）
+## 总览页三步流程
 
-新装第一次打开面板，在**总览 → 开始使用**里只填三样：API Token、子域名前缀（如 `nas`）、本地服务（端口 `8000` 或完整地址 `ssh://127.0.0.1:22`），点**一键初始化**即可。面板按顺序自动执行六步，全程一条进度日志，哪步不成立就停在哪步并给出原因：
+新装第一次打开面板，所有操作都在**总览**一页完成：
 
-1. 验证 Token（顺带把 Token 存进 `workbench.json`）
-2. 自动确定 Account ID（单账号直接回填）
-3. 选域名：只有一个 Zone 自动选中，多个 Zone 会让你在下拉框里挑一次
-4. 复用已有隧道（默认隧道优先），一条都没有才新建
-5. 写规则：建 CNAME + 把路由整份下发到隧道
-6. 启动 cloudflared 并记为该隧道的默认连接
+1. **填凭据**：Account ID（可留空，自动识别）与 API Token，点「保存并验证」。验证报告会列出 Token 状态、账号、可见域名与 Tunnel 权限。
+2. **建并连接隧道**：输入名称创建隧道（也可复用已有隧道），点「连接」，等状态显示「已连接」——面板会轮询云端，确认 cloudflared 与本机连接真正建立。
+3. **添加访问规则**：连接成功后才展开规则表单。子域名、目标域名、本地服务（端口 `8000` 或完整地址 `ssh://127.0.0.1:22`），保存时自动写隧道路由并创建已代理 CNAME。
 
-成功后卡片下方直接给出可访问的 `https://子域名.域名`。同名规则再点一次会按新的服务地址覆盖，**可当作一键修复**用。想细调（换隧道、改协议、看令牌）再进「隧道 / 域名与 DNS / 连接器」标签页。
+> 未连接隧道时规则区保持锁定；断开连接后同样会收起。换隧道只需在隧道列表点另一条的「连接」。
 
 > 下发隧道路由前，面板会先读取该隧道当前配置，**保留 Cloudflare 后台手写的 hostname**，只覆盖面板自己管理的同名规则；读取失败则取消下发，避免误删。
 
@@ -65,7 +63,7 @@ python server.py --check         # 只跑一次自检，打印状态 JSON
 | 区域 | DNS | 编辑 + 读取 |
 | 区域 | 区域 | 读取 |
 
-面板「设置」页填入 Token，点**测试配置**即可：自动完成 Token 校验、账号发现（单账号自动回填 Account ID），并按权限缺失给出提示。域名在添加 DNS 记录时按需选择（M3），无需在此预设。
+面板「总览」页填入 Token，点**保存并验证**即可：自动完成 Token 校验、账号发现（单账号自动回填 Account ID），并按权限缺失给出提示。域名在添加 DNS 记录时按需选择（M3），无需在此预设。
 
 「连接器」页内的「系统设置」卡可保存连接器参数（**系统重启后自动连接**、**进程看门狗**、连接协议 HTTP/2 / QUIC、IP 版本 IPv4 / IPv6），启动连接器时立即读取。
 
@@ -84,11 +82,11 @@ cloudflared 运行在 NAS 上可能需要连续不间断。服务端内置看门
 
 1. **隧道路由（Ingress）**：写入 Cloudflare 的 `cfd_tunnel/{id}/configurations`，形如 `hostname → http://127.0.0.1:5678`；每条隧道的规则列表末尾自动补 `http_status:404` 兜底。缺了它，请求到边缘就报 502/1033。
 2. **DNS CNAME**：`子域名 → <隧道ID>.cfargotunnel.com`，且必须开启橙色云（代理）。缺了它，域名根本不进 Cloudflare 网络。
-3. **连接器在跑**：`cloudflared tunnel run --token <令牌>` 连上这条隧道（隧道页状态为 active）。缺了它，边缘找不到回源出口。
+3. **连接器在跑**：`cloudflared tunnel run --token <令牌>` 连上这条隧道（总览页隧道状态显示「已连接」）。缺了它，边缘找不到回源出口。
 
 隧道一律用 `config_src=cloudflare`（远程托管）创建，所以只需要 `--token` 启动，路由由面板通过 API 下发，NAS 上不需要任何本地 `config.yml`。
 
-## API 一览（均需登录；业务错误返回 HTTP 200 + `{ok:false}`）
+## API 一览（默认免密；关闭免密后均需登录。业务错误返回 HTTP 200 + `{ok:false}`）
 
 | 方法与路径 | 用途 |
 |---|---|
@@ -100,8 +98,7 @@ cloudflared 运行在 NAS 上可能需要连续不间断。服务端内置看门
 | `POST /api/cloudflare/verify` | 测试配置，返回结构化报告（Token/账号/权限） |
 | `GET /api/cloudflare/zones` | 域名列表（M3 DNS 页使用） |
 | `POST /api/cloudflare/zones/primary` | 设置当前目标 Zone（M3） |
-| `POST /api/setup/quick` · `GET /api/setup/quick` | 总览页一键初始化：POST 启动后台任务，GET 轮询六步进度与结果域名（`need_zone` 时附 Zone 列表供选择） |
-| `GET /api/system/settings` · `POST /api/system/settings` | 连接器设置（自动连接 / 协议 / IP 版本 / 看门狗） |
+| `GET /api/system/settings` · `POST /api/system/settings` | 连接器设置（自动连接 / 协议 / IP 版本 / 看门狗）与访问保护（免密开关） |
 | `GET /api/system/info` | 面板版本、运行时长、数据目录、cloudflared 版本、服务进程 |
 | `GET /api/system/selfcheck` | 版本自检：代码指纹、server.py 修改时间、关键路由是否已注册 |
 | `GET /api/system/backup` · `POST /api/system/backup` | 导出 / 导入配置（不含密码与会话密钥） |
@@ -126,8 +123,8 @@ kay-cftunnle/
 ├── server.py               # 服务端（标准库：HTTP + SQLite + 认证 + CF API 路由）
 ├── cf.py                   # Cloudflare API v4 客户端（urllib 实现）
 ├── static/                 # 前端（无构建步骤）
-│   ├── index.html          #   页面骨架（登录 + 面板框架 + 设置/隧道页）
-│   ├── app.js              #   业务逻辑（路由/设置/隧道/弹层/日志）
+│   ├── index.html          #   页面骨架（登录 + 总览/域名/连接器/设置）
+│   ├── app.js              #   业务逻辑（路由/凭据/隧道/规则/日志）
 │   ├── styles.css          #   布局与组件
 │   ├── theme.css           #   主题令牌（橙品牌 / 暖黑深色）
 │   └── theme.js            #   明暗偏好预应用
@@ -214,7 +211,7 @@ sudo sh deploy/install.sh
 | 构建卡在拉取 cloudflared | Dockerfile 已改用官方 `cloudflare/cloudflared` 镜像多阶段复制，无需访问 GitHub |
 | 打不开页面 | 飞牛「系统设置 → 防火墙」放行 8567 |
 | 页面提示「接口不存在：/xxx」 | 三步定位：① 页面报错处点「运行版本自检」，看 `all_routes_ok`；② `curl http://<NAS>:端口/api/system/selfcheck` 看 `code_sha` 与 `server_mtime`；③ 从容器内确认 `docker exec kay-cftunnle grep -c 'dns-records' /app/server.py`。返回 `0` 说明容器里是旧代码，执行 `cd <安装目录> && docker compose up -d --build --force-recreate`；返回非 `0` 说明代码是新的，强制刷新浏览器缓存（Ctrl+Shift+R）即可 |
-| 想在本机开发时免登录 | 把 `data/workbench.json` 里 `panel.no_auth_run` 改成 `true` 并重启服务（出厂默认 `false`，NAS 上不要开：任何能访问端口的人都能读到 Token） |
+| 想让面板重新要求登录 | 「设置 → 访问保护」关闭「免密访问」并保存。出厂默认开启免密；开启时任何能访问端口的人都能操作隧道与 DNS，公网部署务必关闭 |
 | 验证提示「Invalid request headers」等 CF 错误码 | Token 无效或权限不足；错误码（6003/7003/10000 等）为 Cloudflare 原文，按提示检查 Token 与权限 |
 | 连接器页显示「未安装」 | cloudflared 二进制不在 PATH 中；Docker 部署已内置，本地开发请下载并放到 PATH 或项目根目录 |
 | 启动连接器提示「未找到 cloudflared」 | 同上；Windows 请把 `cloudflared.exe` 放在项目根目录或加入系统 PATH |

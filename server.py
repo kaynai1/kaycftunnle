@@ -29,18 +29,21 @@
 import argparse
 import hashlib
 import hmac
+import ipaddress
 import json
 import mimetypes
 import os
 import re
 import secrets
 import signal
+import socket
 import sqlite3
 import subprocess
 import sys
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
@@ -70,9 +73,9 @@ CONFIG_PATH = DATA_DIR / "workbench.json"
 DB_PATH = DATA_DIR / "kay-cftunnle.sqlite3"
 SESSION_COOKIE = "kay_cftunnle_session"
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.5.0"
 # 静态资源版本号：改前端后递增，用于破浏览器缓存（需与 index.html 的 ?v= 保持一致）
-STATIC_REV = 24
+STATIC_REV = 41
 START_TIME = time.time()
 SESSION_MAX_AGE = 7 * 24 * 60 * 60
 # 连接器运行超过该秒数视为「稳定运行」，看门狗重试计数归零
@@ -134,8 +137,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "panel": {
         "title": "Kay-cftunnle 面板",
-        # 仅本机开发用：免登录直接进面板。出厂必须是 False，否则 NAS 上任何人都能读到 Token
-        "no_auth_run": False,
+        # 免密模式：打开面板即进入管理员视图。
+        # 面板持有 Cloudflare Token 权限，切勿在公网裸奔；可用设置页开关关掉。
+        "no_auth_run": True,
+        "auth_mode_migrated": True,
     },
 }
 
@@ -165,6 +170,11 @@ def load_config() -> Dict[str, Any]:
                 cfg["auth"]["password"] = DEFAULT_PASSWORD
         except Exception as exc:  # pragma: no cover - 损坏时兜底
             print(f"[!] workbench.json 解析失败（{exc}），使用默认配置", file=sys.stderr)
+    panel_cfg = cfg.setdefault("panel", {})
+    # 旧配置一次性迁移到免密模式；迁移标记落盘后，用户在设置页关掉免密不会被再次覆盖
+    if not panel_cfg.get("auth_mode_migrated"):
+        panel_cfg["no_auth_run"] = True
+        panel_cfg["auth_mode_migrated"] = True
     if not cfg["auth"].get("secret"):
         cfg["auth"]["secret"] = secrets.token_hex(32)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -213,6 +223,49 @@ def recent_logs(limit: int = 20) -> List[Dict[str, Any]]:
     ]
 
 
+def add_connector_event(kind: str, detail: str = "") -> None:
+    """记录连接器生命周期事件，供「稳定性时间线」展示。"""
+    try:
+        now = int(time.time())
+        with db_connect() as conn:
+            conn.execute(
+                "INSERT INTO connector_events(ts, kind, detail) VALUES(?,?,?)",
+                (now, str(kind)[:24], str(detail)[:300]),
+            )
+            conn.execute("DELETE FROM connector_events WHERE ts<?", (now - 7 * 24 * 3600,))
+    except Exception as exc:  # pragma: no cover - 事件记录失败不阻断连接器
+        print(f"[!] 写连接器事件失败: {exc}", file=sys.stderr)
+
+
+def connector_events(hours: int = 24, limit: int = 40) -> Dict[str, Any]:
+    """返回时间窗口内的连接器事件（新的在前）与分类计数。"""
+    hours = max(1, min(int(hours), 168))
+    limit = max(1, min(int(limit), 200))
+    since = int(time.time()) - hours * 3600
+    with db_connect() as conn:
+        rows = conn.execute(
+            "SELECT ts, kind, detail FROM connector_events WHERE ts>=? ORDER BY id DESC LIMIT ?",
+            (since, limit),
+        ).fetchall()
+        counts = {r["kind"]: r["count"] for r in conn.execute(
+            "SELECT kind, COUNT(*) AS count FROM connector_events WHERE ts>=? GROUP BY kind",
+            (since,),
+        ).fetchall()}
+    return {
+        "events": [
+            {
+                "time": datetime.fromtimestamp(r["ts"]).strftime("%m-%d %H:%M:%S"),
+                "ts": r["ts"],
+                "kind": r["kind"],
+                "detail": r["detail"],
+            }
+            for r in rows
+        ],
+        "counts": counts,
+        "hours": hours,
+    }
+
+
 def mask_token(token: str) -> str:
     """Token 脱敏显示：前 6 后 4。"""
     token = token or ""
@@ -240,17 +293,7 @@ def update_cloudflare_settings(cfg: Dict[str, Any], api_token: str = "",
         save_config(cfg)
 
 
-# ------------------------------------------------------------------ 一键初始化（总览页「开始使用」）
-
-QS_STEPS = (
-    ("token", "验证 Cloudflare API Token"),
-    ("account", "确定 Account ID"),
-    ("zone", "选择域名 Zone"),
-    ("tunnel", "准备 Cloudflare 隧道"),
-    ("route", "写规则并下发路由"),
-    ("connector", "启动 cloudflared 连接器"),
-)
-
+# ------------------------------------------------------------------ 本地服务地址
 
 def _normalize_service(raw: Any) -> str:
     """把「端口号」补成本机 HTTP 地址；填了完整地址的原样放行，交给 _service_ok 校验。"""
@@ -262,84 +305,95 @@ def _normalize_service(raw: Any) -> str:
     return s
 
 
-class QuickSetup:
-    """后台任务状态：六步要跑好几个 Cloudflare 往返，同步返回会把前端卡到超时，
-    所以真正的执行放线程里，前端轮询这份状态渲染进度日志。"""
-
-    def __init__(self) -> None:
-        self.lock = threading.Lock()
-        self.running = False
-        self.ok: Optional[bool] = None
-        self.error = ""
-        self.hostname = ""
-        self.tunnel_id = ""
-        self.tunnel_name = ""
-        self.zone_name = ""
-        self.need_zone = False
-        self.zones: List[Dict[str, str]] = []
-        self.steps: List[Dict[str, str]] = []
-        self.started_at = 0
-        self.finished_at = 0
-
-    def begin(self) -> bool:
-        with self.lock:
-            if self.running:
-                return False
-            self.ok = None
-            self.error = ""
-            self.hostname = ""
-            self.tunnel_id = ""
-            self.tunnel_name = ""
-            self.zone_name = ""
-            self.need_zone = False
-            self.zones = []
-            self.steps = [{"key": k, "label": l, "state": "pending", "detail": ""} for k, l in QS_STEPS]
-            self.started_at = int(time.time())
-            self.finished_at = 0
-            self.running = True
-            return True
-
-    def set(self, key: str, state: str, detail: str = "") -> None:
-        with self.lock:
-            for st in self.steps:
-                if st["key"] == key:
-                    st["state"] = state
-                    if detail:
-                        st["detail"] = detail
-                    break
-
-    def set_zones(self, zones: List[Dict[str, str]], need_choice: bool = False) -> None:
-        with self.lock:
-            self.zones = [{"id": z.get("id", ""), "name": z.get("name", "")} for z in zones]
-            self.need_zone = bool(need_choice)
-
-    def finish(self, ok: bool, error: str = "") -> None:
-        with self.lock:
-            self.running = False
-            self.ok = ok
-            self.error = error
-            self.finished_at = int(time.time())
-
-    def snapshot(self) -> Dict[str, Any]:
-        with self.lock:
-            return {
-                "ok": True,
-                "running": self.running,
-                "done": self.ok,
-                "error": self.error,
-                "hostname": self.hostname,
-                "tunnel_id": self.tunnel_id,
-                "tunnel_name": self.tunnel_name,
-                "zone_name": self.zone_name,
-                "need_zone": self.need_zone,
-                "zones": list(self.zones),
-                "steps": [dict(s) for s in self.steps],
-                "started_at": self.started_at,
-                "finished_at": self.finished_at,
-            }
+# 回源探测只允许访问本机回环，避免面板变成内网端口扫描器
+_PROBE_DEFAULT_PORTS = {
+    "http": 80, "https": 443, "tls": 443, "ssh": 22, "rdp": 3389, "smb": 445,
+    "smtp": 25, "mysql": 3306, "postgresql": 5432, "clickhouse": 8123, "kafka": 9092,
+}
 
 
-QS = QuickSetup()
+def _probe_error_text(exc: OSError) -> str:
+    if isinstance(exc, ConnectionRefusedError):
+        return "连接被拒绝，服务可能没有启动"
+    if isinstance(exc, socket.gaierror):
+        return "无法解析主机名"
+    return str(exc) or exc.__class__.__name__
+
+
+def _probe_unix_socket(path: str) -> Dict[str, Any]:
+    if not path:
+        return {"reachable": False, "error": "unix 地址缺少 socket 路径"}
+    if not os.path.exists(path):
+        return {"reachable": False, "error": "socket 文件不存在"}
+    if not hasattr(socket, "AF_UNIX"):
+        return {"reachable": None, "skipped": True, "error": "当前系统不支持 unix socket 检测"}
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(1.5)
+    started = time.perf_counter()
+    try:
+        sock.connect(path)
+    except (socket.timeout, TimeoutError):
+        return {"reachable": False, "error": "连接超时（1.5 秒）"}
+    except OSError as exc:
+        return {"reachable": False, "error": _probe_error_text(exc)}
+    finally:
+        sock.close()
+    return {"reachable": True,
+            "latency_ms": int(round((time.perf_counter() - started) * 1000))}
+
+
+def _probe_service(raw: Any) -> Dict[str, Any]:
+    """探测一个回源地址，返回统一结构；只允许回环 TCP 与 unix socket。
+
+    ok=False 表示参数本身不合法；ok=True + reachable=False 表示连不上；
+    reachable=None 表示协议无法/不允许检测。调用方无需再区分 HTTP 状态。
+    """
+    service = _normalize_service(raw)
+    if not service:
+        return {"ok": False, "error": "本地服务地址不能为空"}
+    if not _service_ok(service):
+        return {"ok": False, "error": "本地服务地址协议不受支持（http/https/tcp/tls/ssh/rdp/unix 等）"}
+    parsed = urlparse(service)
+    scheme = (parsed.scheme or "").lower()
+    if scheme == "udp":
+        return {"ok": True, "reachable": None, "skipped": True, "service": service,
+                "target": service, "error": "UDP 是无连接协议，无法用 TCP 探测"}
+    if scheme == "unix":
+        path = service[len("unix:"):]
+        if path.startswith("//"):
+            path = path[2:]
+        result = _probe_unix_socket(path)
+        result.update({"ok": True, "service": service, "target": path})
+        return result
+    host = parsed.hostname or ""
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    if port is None:
+        port = _PROBE_DEFAULT_PORTS.get(scheme)
+    if not host or not port or not 1 <= port <= 65535:
+        return {"ok": False, "error": "无法解析主机与端口，请写成 http://127.0.0.1:8080 这样的完整地址"}
+    try:
+        loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = host.lower() == "localhost"
+    target = ("[%s]:%d" % (host, port)) if ":" in host else ("%s:%d" % (host, port))
+    if not loopback:
+        return {"ok": True, "reachable": None, "skipped": True, "service": service,
+                "target": target, "error": "只检测本机回环地址（127.0.0.1 / localhost / ::1）"}
+    started = time.perf_counter()
+    try:
+        with socket.create_connection((host, port), timeout=1.5):
+            pass
+    except (socket.timeout, TimeoutError):
+        return {"ok": True, "reachable": False, "service": service, "target": target,
+                "error": "连接超时（1.5 秒）"}
+    except OSError as exc:
+        return {"ok": True, "reachable": False, "service": service, "target": target,
+                "error": _probe_error_text(exc)}
+    return {"ok": True, "reachable": True, "service": service, "target": target,
+            "latency_ms": int(round((time.perf_counter() - started) * 1000))}
 
 
 # ------------------------------------------------------------------ 连接器（M4 cloudflared 进程监管）
@@ -586,6 +640,7 @@ class ConnectorManager:
                     "tunnel_id": resolved,
                     "reason": reason,
                 }
+                add_connector_event("exit", "启动后立即退出（退出码 %s）：%s" % (rc, reason))
 
                 if not fatal:
                     # 网络类问题：保留 proc 交给看门狗按退避继续重试
@@ -601,6 +656,7 @@ class ConnectorManager:
                 # 避免看门狗 5 次无意义重试把日志刷满、还让界面一直"重试中"
                 self._close_log_fh()
                 self._exit_info["give_up"] = True
+                add_connector_event("give_up", "启动参数或令牌不可用，已停止重试：" + reason)
                 return {"ok": False, "error": last_error}
 
             if self.proc is None:
@@ -608,6 +664,7 @@ class ConnectorManager:
                 self._close_log_fh()
                 if self._exit_info:
                     self._exit_info["give_up"] = True
+                add_connector_event("give_up", last_error or "cloudflared 启动失败")
                 return {"ok": False, "error": last_error or "cloudflared 启动失败"}
 
             if not auto:
@@ -621,6 +678,10 @@ class ConnectorManager:
             ip_label = {"4": "IPv4", "6": "IPv6"}.get(edge_ip, "IPv4/IPv6 自动")
             add_log("connector", "启动隧道 %s（%s / %s）%s"
                     % (resolved[:8], protocol, ip_label, "· 自动重试第 %d 次" % self._retry_count if auto and self._retry_count else ""))
+            add_connector_event("start", "隧道 %s · %s / %s%s"
+                    % (resolved[:8], protocol, ip_label,
+                       " · 自动拉起第 %d 次" % self._retry_count if auto and self._retry_count else
+                       (" · 自动拉起" if auto else "")))
 
             return {
                 "ok": True,
@@ -726,6 +787,7 @@ class ConnectorManager:
             self._clear_pid()
             self.current_tunnel_id = ""
             add_log("connector", "停止连接器（PID %s）" % self.proc.pid)
+            add_connector_event("stop", "手动停止（PID %s）" % self.proc.pid)
             return {"ok": True, "was_running": True}
 
     def _close_log_fh(self) -> None:
@@ -739,6 +801,7 @@ class ConnectorManager:
             self._log_fh = None
 
     def restart(self, tunnel_id: str = "") -> Dict[str, Any]:
+        add_connector_event("restart", "手动重启" + (" · 隧道 " + tunnel_id[:8] if tunnel_id else ""))
         self.stop(by_user=False)
         return self.start(tunnel_id)
 
@@ -804,6 +867,8 @@ class ConnectorManager:
             self._exit_info["reason"] = reason
             add_log("connector", "进程意外退出（退出码 %s，运行 %ds）：%s"
                     % (rc, uptime, reason or "无日志"), "error")
+            add_connector_event("exit", "退出码 %s · 运行 %ds · %s"
+                    % (rc, uptime, reason or "无日志输出"))
             max_retry = int(conn_cfg.get("watchdog_max_retry", 5) or 5)
             # 运行足够久才挂，说明隧道本身是健康的，计数归零避免长期累积
             if uptime >= STABLE_RUN_SECONDS:
@@ -812,14 +877,18 @@ class ConnectorManager:
             if fatal and uptime <= 10:
                 add_log("connector", "退出原因是配置问题，已停止自动拉起：" + reason, "error")
                 self._exit_info["give_up"] = True
+                add_connector_event("give_up", "配置问题，停止自动拉起：" + reason)
                 return
             if self._retry_count >= max_retry:
                 add_log("connector", "自动重试已达上限（%d 次），已停止拉起" % max_retry, "error")
                 self._exit_info["give_up"] = True
+                add_connector_event("give_up", "自动重试已达上限（%d 次）" % max_retry)
                 return
             self._retry_count += 1
             delay = min(60, 2 ** self._retry_count)  # 2,4,8,16,32,60… 秒
             tunnel_id = self.current_tunnel_id
+            add_connector_event("retry", "第 %d 次自动拉起，%d 秒后重试"
+                                % (self._retry_count, delay))
 
         # 锁外退避等待（不阻塞 status 查询）
         time.sleep(delay)
@@ -830,6 +899,7 @@ class ConnectorManager:
             self._last_restart_at = time.time()
         else:
             add_log("connector", "自动拉起失败：" + str(result.get("error")), "error")
+            add_connector_event("start_fail", "自动拉起失败：" + str(result.get("error")))
 
     def _tail_reason(self) -> str:
         """从日志尾部提取一条最有信息量的错误行。"""
@@ -920,7 +990,7 @@ class ConnectorManager:
                 "current_tunnel_id": self.current_tunnel_id,
                 "auto_connect": conn_cfg.get("auto_connect", False),
                 "watchdog": self.watchdog_info(),
-                "logs": self._read_logs(30),
+                "logs": self._read_logs(200),
             }
 
     def auto_connect(self) -> None:
@@ -936,6 +1006,7 @@ class ConnectorManager:
             print("[*] 自动启动 cloudflared 成功，PID %s" % result.get("pid"), flush=True)
         else:
             print("[!] 自动启动 cloudflared 失败：%s" % result.get("error"), file=sys.stderr)
+            add_connector_event("start_fail", "服务启动时自动连接失败：" + str(result.get("error")))
 
 
 # ------------------------------------------------------------------ 数据库
@@ -964,6 +1035,13 @@ CREATE TABLE IF NOT EXISTS logs(
     detail TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts);
+CREATE TABLE IF NOT EXISTS connector_events(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_connector_events_ts ON connector_events(ts);
 CREATE TABLE IF NOT EXISTS ingress_rules(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     subdomain TEXT NOT NULL,
@@ -1108,12 +1186,15 @@ class PanelHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # noqa: N802 - 基类签名
         sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), fmt % args))
 
-    def _send_json(self, payload: Dict[str, Any], status: int = 200) -> None:
+    def _send_json(self, payload: Dict[str, Any], status: int = 200,
+                   headers: Optional[Dict[str, str]] = None) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        for key, val in (headers or {}).items():
+            self.send_header(key, val)
         self.end_headers()
         if not self._head_only:  # HEAD 请求只发头，发体会导致 keep-alive 连接错位
             self.wfile.write(body)
@@ -1124,13 +1205,11 @@ class PanelHandler(BaseHTTPRequestHandler):
         self._send_json({"ok": False, "error": message}, status)
 
     def _read_body(self) -> Dict[str, Any]:
-        try:
-            length = int(self.headers.get("Content-Length") or 0)
-        except ValueError:
+        # _dispatch 已经按 Content-Length 读空请求体，避免 keep-alive 连接里
+        # 未消费的 "{}" 粘到下一条请求上（表现为 501 Unsupported method）。
+        raw = getattr(self, "_raw_body", b"")
+        if not raw:
             return {}
-        if length <= 0 or length > 1 << 20:
-            return {}
-        raw = self.rfile.read(length)
         try:
             data = json.loads(raw.decode("utf-8"))
             return data if isinstance(data, dict) else {}
@@ -1169,6 +1248,14 @@ class PanelHandler(BaseHTTPRequestHandler):
 
     def _dispatch(self, method: str, head_only: bool = False) -> None:
         self._head_only = head_only
+        self._raw_body = b""
+        if method != "GET":
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
+            if 0 < length <= 1 << 20:
+                self._raw_body = self.rfile.read(length)
         path = urlparse(self.path).path
         try:
             if path.startswith("/api/"):
@@ -1298,12 +1385,6 @@ class PanelHandler(BaseHTTPRequestHandler):
         if route == "/cloudflare/status" and method == "GET":
             self._api_cf_status()
             return
-        if route == "/setup/quick" and method == "POST":
-            self._api_setup_quick_start()
-            return
-        if route == "/setup/quick" and method == "GET":
-            self._send_json(QS.snapshot())
-            return
         if route == "/cloudflare/settings" and method == "POST":
             self._api_cf_settings_save()
             return
@@ -1352,6 +1433,12 @@ class PanelHandler(BaseHTTPRequestHandler):
         if route == "/ingresses" and method == "POST":
             self._api_ingress_create()
             return
+        if route == "/ingresses/probe" and method == "POST":
+            self._api_ingress_probe()
+            return
+        if route == "/ingresses/probe-batch" and method == "POST":
+            self._api_ingress_probe_batch()
+            return
         if route == "/ingresses/sync" and method == "POST":
             self._api_ingress_sync()
             return
@@ -1372,6 +1459,9 @@ class PanelHandler(BaseHTTPRequestHandler):
             return
         if route == "/connector/status" and method == "GET":
             self._api_connector_status()
+            return
+        if route == "/connector/events" and method == "GET":
+            self._api_connector_events()
             return
         if route == "/connector/start" and method == "POST":
             self._api_connector_start()
@@ -1395,215 +1485,6 @@ class PanelHandler(BaseHTTPRequestHandler):
             % (route, method),
             log=True,
         )
-
-    # ---- 一键初始化 ----
-
-    def _api_setup_quick_start(self) -> None:
-        body = self._read_body()
-        subdomain = str(body.get("subdomain") or "").strip().lower()
-        service = _normalize_service(body.get("service"))
-        if not subdomain:
-            self._send_error_json(400, "请填写子域名前缀")
-            return
-        if subdomain not in ("@", "*") and not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?", subdomain):
-            self._send_error_json(400, "子域名只能包含小写字母、数字与连字符，1-63 位；@ 为根域名")
-            return
-        if not service:
-            self._send_error_json(400, "请填写本地服务：端口号（如 8000）或完整地址（如 ssh://127.0.0.1:22）")
-            return
-        if not _service_ok(service):
-            self._send_error_json(400, "本地服务地址协议不受支持（http/https/tcp/tls/ssh/rdp/unix 等）")
-            return
-        params = {
-            "api_token": str(body.get("api_token") or "").strip(),
-            "subdomain": subdomain,
-            "service": service,
-            "zone_id": str(body.get("zone_id") or "").strip(),
-        }
-        if not QS.begin():
-            self._send_error_json(409, "上一次初始化仍在进行，请等它结束后再试")
-            return
-        threading.Thread(target=self._run_quick_setup, args=(params,), daemon=True).start()
-        add_log("setup", "开始一键初始化：%s → %s" % (subdomain, service))
-        self._send_json(QS.snapshot())
-
-    def _run_quick_setup(self, params: Dict[str, Any]) -> None:
-        """按六个一步到位跑完；任何一步不成立就停下，把原因留在该步的 detail 里。"""
-        labels = dict(QS_STEPS)
-
-        def fail(key: str, detail: str) -> None:
-            QS.set(key, "failed", detail)
-            QS.finish(False, detail)
-            add_log("setup", "初始化停在「%s」：%s" % (labels[key], detail), "warn")
-
-        def ok_step(key: str, detail: str = "") -> None:
-            QS.set(key, "done", detail)
-
-        try:
-            self._quick_setup_steps(params, fail, ok_step)
-        except Exception as exc:  # noqa: BLE001 - 后台线程不能把异常抛给前端
-            steps = QS.snapshot()["steps"]
-            current = next((s["key"] for s in steps if s["state"] == "running"), "connector")
-            fail(current, "初始化异常：%s" % exc)
-
-    def _quick_setup_steps(self, params, fail, ok_step) -> None:
-        cf = self.cfg["cloudflare"]
-
-        # 1) Token
-        QS.set("token", "running")
-        token = params["api_token"] or str(cf.get("api_token") or "").strip()
-        if not token:
-            fail("token", "请填写 Cloudflare API Token")
-            return
-        client = CloudflareClient(token, str(cf.get("account_id") or "").strip())
-        try:
-            client.verify_token()
-        except CloudflareError as exc:
-            fail("token", "Token 验证失败：%s（检查 Token 是否过期、权限是否勾选）" % exc)
-            return
-        update_cloudflare_settings(self.cfg, token)
-        ok_step("token", "有效")
-
-        # 2) Account
-        QS.set("account", "running")
-        account = client.account_id
-        accounts, acct_error = [], ""
-        try:
-            accounts = client.list_accounts()
-        except CloudflareError as exc:
-            acct_error = str(exc)
-        if account and accounts and all(a["id"] != account for a in accounts):
-            account = ""  # 旧值不在这个 Token 可见范围里，重新确定
-        if not account and len(accounts) == 1:
-            account = accounts[0]["id"]
-        if not account and len(accounts) > 1:
-            fail("account", "该 Token 可见多个账号（%s），请到「设置」页指定 Account ID"
-                 % "、".join(a["name"] or a["id"] for a in accounts))
-            return
-        if not account:
-            fail("account", "未能自动获取 Account ID%s，请到「设置」页手动填写"
-                 % ("" if not acct_error else "（%s）" % acct_error))
-            return
-        client.account_id = account
-        update_cloudflare_settings(self.cfg, "", account)
-        ok_step("account", account)
-
-        # 3) Zone
-        QS.set("zone", "running")
-        try:
-            zones = client.list_zones()
-        except CloudflareError as exc:
-            fail("zone", "域名列表获取失败：%s（检查「区域 → 区域读取」权限）" % exc)
-            return
-        if not zones:
-            fail("zone", "该账号下没有可用域名，请先在 Cloudflare 添加并托管域名")
-            return
-        chosen, why = None, ""
-        want = params["zone_id"] or cf.get("primary_zone") or ""
-        for z in zones:
-            if want and z["id"] == want:
-                chosen = z
-                why = "按本次选择" if params["zone_id"] else "沿用已选域名"
-                break
-        if chosen is None and len(zones) == 1:
-            chosen, why = zones[0], "账号下唯一域名"
-        if chosen is None:
-            QS.set_zones(zones, True)
-            fail("zone", "检测到 %d 个域名，请在下方选一个再点「开始使用」" % len(zones))
-            return
-        QS.set_zones(zones)
-        update_cloudflare_settings(self.cfg, "", None, chosen["id"])
-        ok_step("zone", "%s（%s）" % (chosen["name"], why))
-
-        # 4) 隧道：能复用就复用，一条都没有才新建
-        QS.set("tunnel", "running")
-        try:
-            tunnels = client.list_tunnels()
-        except CloudflareError as exc:
-            fail("tunnel", "隧道列表获取失败：%s（检查「账户 → Cloudflare Tunnel」权限）" % exc)
-            return
-        preferred = str((self.cfg.get("connector") or {}).get("default_tunnel_id") or "").strip()
-        tunnel = next((t for t in tunnels if t["id"] == preferred), None)
-        if tunnel is None and tunnels:
-            tunnel = tunnels[0]
-        if tunnel is not None:
-            ok_step("tunnel", "复用已有隧道 %s" % (tunnel.get("name") or tunnel["id"][:8]))
-        else:
-            base = params["subdomain"]
-            if not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?", base):
-                base = "kay-cftunnle"
-            name = base
-            try:
-                created = client.create_tunnel(name)
-            except CloudflareError as exc:
-                fail("tunnel", "创建隧道失败：%s" % exc)
-                return
-            if not isinstance(created, dict) or not created.get("id"):
-                fail("tunnel", "Cloudflare 未返回新建隧道的 ID")
-                return
-            tunnel = {"id": created["id"], "name": created.get("name") or name}
-            ok_step("tunnel", "新建隧道 %s" % tunnel["name"])
-
-        # 5) 规则：DNS CNAME + 隧道路由，两步都齐了域名才打得开
-        QS.set("route", "running")
-        subdomain = params["subdomain"]
-        service = params["service"]
-        full_name = _rule_hostname(subdomain, chosen["name"])
-        cname_target = tunnel["id"] + ".cfargotunnel.com"
-        try:
-            record_id = self._upsert_dns_cname(client, chosen["id"], full_name, cname_target)
-        except CloudflareError as exc:
-            fail("route", "创建 CNAME 记录失败：%s" % exc)
-            return
-        now = int(time.time())
-        with db_connect() as conn:
-            row = conn.execute(
-                "SELECT id FROM ingress_rules WHERE subdomain=? AND zone_id=?",
-                (subdomain, chosen["id"]),
-            ).fetchone()
-            if row is None:
-                conn.execute(
-                    "INSERT INTO ingress_rules(subdomain, zone_id, zone_name, tunnel_id, tunnel_name, "
-                    "service, cf_record_id, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                    (subdomain, chosen["id"], chosen["name"], tunnel["id"], tunnel.get("name", ""),
-                     service, record_id, now, now),
-                )
-            else:
-                conn.execute(
-                    "UPDATE ingress_rules SET tunnel_id=?, tunnel_name=?, zone_name=?, service=?, "
-                    "cf_record_id=?, updated_at=? WHERE id=?",
-                    (tunnel["id"], tunnel.get("name", ""), chosen["name"], service, record_id, now, row["id"]),
-                )
-        synced, sync_error = self._sync_tunnel_ingress(client, tunnel["id"])
-        if not synced:
-            fail("route", "隧道路由下发失败：%s" % sync_error)
-            return
-        with QS.lock:
-            QS.hostname = full_name
-            QS.tunnel_id = tunnel["id"]
-            QS.tunnel_name = tunnel.get("name", "")
-            QS.zone_name = chosen["name"]
-        ok_step("route", "%s → %s" % (full_name, service))
-
-        # 6) 连接器
-        QS.set("connector", "running")
-        with _CFG_LOCK:
-            self.cfg.setdefault("connector", {})["default_tunnel_id"] = tunnel["id"]
-            save_config(self.cfg)
-        status = CONNECTOR.status()
-        if status.get("running") and status.get("current_tunnel_id") == tunnel["id"]:
-            ok_step("connector", "cloudflared 已在跑这条隧道")
-        else:
-            if status.get("running"):
-                CONNECTOR.stop(by_user=False)
-            CONNECTOR.reset_watchdog()
-            result = CONNECTOR.start(tunnel["id"])
-            if not result.get("ok"):
-                fail("connector", result.get("error") or "cloudflared 启动失败")
-                return
-            ok_step("connector", "已启动，首次建立连接约需几秒")
-        QS.finish(True)
-        add_log("setup", "一键初始化完成：%s → %s" % (QS.hostname, params["service"]))
 
     # ---- Cloudflare 凭据 ----
 
@@ -1658,7 +1539,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                 update_cloudflare_settings(self.cfg, account_id=accounts[0]["id"])
             elif not report["account_id"] and len(accounts) > 1:
                 report["warnings"].append("检测到多个账号，请在下方选择 Account ID")
-            elif report["account_id"] and all(a["id"] != report["account_id"] for a in accounts):
+            elif accounts and report["account_id"] and all(a["id"] != report["account_id"] for a in accounts):
                 report["warnings"].append("当前 Account ID 不在 Token 可见账号列表中，请检查")
         except CloudflareError as exc:
             report["warnings"].append("账号列表获取失败（不影响已填 Account ID 的使用）：" + str(exc))
@@ -1705,7 +1586,11 @@ class PanelHandler(BaseHTTPRequestHandler):
     # ---- 系统设置（连接器参数，M4 生效） ----
 
     def _api_system_settings_get(self) -> None:
-        self._send_json({"ok": True, "connector": self.cfg.get("connector", {})})
+        self._send_json({
+            "ok": True,
+            "connector": self.cfg.get("connector", {}),
+            "panel": {"no_auth_run": bool(self.cfg["panel"].get("no_auth_run"))},
+        })
 
     def _api_system_settings_save(self) -> None:
         body = self._read_body()
@@ -1739,21 +1624,55 @@ class PanelHandler(BaseHTTPRequestHandler):
                 return
             changed["watchdog_max_retry"] = retry
 
-        if not changed:
+        panel_changed: Dict[str, Any] = {}
+        was_no_auth = bool(self.cfg["panel"].get("no_auth_run"))
+        if "no_auth_run" in body:
+            panel_changed["no_auth_run"] = bool(body.get("no_auth_run"))
+
+        if not changed and not panel_changed:
             self._send_error_json(400, "没有需要更新的设置项")
             return
 
         with _CFG_LOCK:
             conn_cfg.update(changed)
+            self.cfg["panel"].update(panel_changed)
             save_config(self.cfg)
 
         if changed.get("watchdog") is False:
             CONNECTOR.reset_watchdog()
-        add_log(
-            "settings",
-            "连接器设置已更新（%s）" % "、".join("%s=%s" % (k, v) for k, v in changed.items()),
+
+        # 关闭免密时顺手发一个会话，避免保存成功后立刻被踢回登录页
+        headers: Dict[str, str] = {}
+        if was_no_auth and panel_changed.get("no_auth_run") is False:
+            with db_connect() as conn:
+                row = conn.execute(
+                    "SELECT id FROM users WHERE role='admin' ORDER BY created_at LIMIT 1"
+                ).fetchone()
+            if row is not None:
+                token = create_session(row["id"])
+                headers["Set-Cookie"] = (
+                    f"{SESSION_COOKIE}={token}; Max-Age={SESSION_MAX_AGE}; "
+                    "Path=/; HttpOnly; SameSite=Lax"
+                )
+
+        if changed:
+            add_log(
+                "settings",
+                "连接器设置已更新（%s）" % "、".join("%s=%s" % (k, v) for k, v in changed.items()),
+            )
+        if panel_changed:
+            add_log(
+                "settings",
+                "访问保护已更新（%s）" % ("免密访问开启" if panel_changed.get("no_auth_run") else "免密访问关闭"),
+            )
+        self._send_json(
+            {
+                "ok": True,
+                "connector": conn_cfg,
+                "panel": {"no_auth_run": bool(self.cfg["panel"].get("no_auth_run"))},
+            },
+            headers=headers,
         )
-        self._send_json({"ok": True, "connector": self.cfg["connector"]})
 
     def _api_backup_export(self) -> None:
         """导出配置：只含可迁移的业务配置，不含密码、会话密钥。"""
@@ -2015,6 +1934,42 @@ class PanelHandler(BaseHTTPRequestHandler):
                 ing["remote_service"] = (matched or {}).get("service") or ""
         self._send_json({"ok": True, "configured": True, "ingresses": ingresses})
 
+    def _api_ingress_probe(self) -> None:
+        """TCP 探测单个本地回源服务（仅回环地址与 unix socket）。"""
+        body = self._read_body()
+        self._send_json(_probe_service(body.get("service")))
+
+    def _api_ingress_probe_batch(self) -> None:
+        """批量探测已保存规则的本地服务；ids 为空表示全部规则。"""
+        body = self._read_body()
+        raw_ids = body.get("ids")
+        ids = [str(x) for x in raw_ids if str(x)] if isinstance(raw_ids, list) else []
+        with db_connect() as conn:
+            if ids:
+                marks = ",".join("?" for _ in ids)
+                rows = conn.execute(
+                    "SELECT id, service FROM ingress_rules WHERE id IN (%s)" % marks, ids
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT id, service FROM ingress_rules ORDER BY id DESC").fetchall()
+        if not rows:
+            self._send_json({"ok": True, "results": []})
+            return
+        results: List[Dict[str, Any]] = []
+        workers = min(8, len(rows))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_probe_service, row["service"]): row for row in rows}
+            for future, row in futures.items():
+                try:
+                    item = future.result()
+                except Exception as exc:  # 单个探测异常不应拖垮整批
+                    item = {"ok": False, "error": "探测失败：" + str(exc)}
+                item["id"] = str(row["id"])
+                results.append(item)
+        order = {str(row["id"]): idx for idx, row in enumerate(rows)}
+        results.sort(key=lambda x: order.get(x.get("id"), 0))
+        self._send_json({"ok": True, "results": results})
+
     def _upsert_dns_cname(self, client, zone_id: str, full_name: str, cname_target: str) -> str:
         """创建或原地更新同名 CNAME，避免 Cloudflare 81053（记录已存在）。
 
@@ -2134,14 +2089,14 @@ class PanelHandler(BaseHTTPRequestHandler):
 
     def _api_ingress_create(self) -> None:
         body = self._read_body()
-        subdomain = str(body.get("subdomain") or "").strip().lower()
+        subdomain = str(body.get("subdomain") or "").strip().lower() or "@"
         zone_id = str(body.get("zone_id") or "").strip()
         zone_name = str(body.get("zone_name") or "").strip()
         tunnel_id = str(body.get("tunnel_id") or "").strip()
         tunnel_name = str(body.get("tunnel_name") or "").strip()
-        service = str(body.get("service") or "").strip()
-        if not subdomain or not zone_id or not tunnel_id or not service:
-            self._send_error_json(400, "子域名、Zone、隧道、本地服务地址均不能为空")
+        service = _normalize_service(body.get("service"))
+        if not zone_id or not tunnel_id or not service:
+            self._send_error_json(400, "Zone、隧道、本地服务地址均不能为空")
             return
         if subdomain not in ("@", "*") and not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?", subdomain):
             self._send_error_json(400, "子域名只能包含小写字母、数字与连字符，1-63 位，且不能以连字符开头或结尾；"
@@ -2190,7 +2145,7 @@ class PanelHandler(BaseHTTPRequestHandler):
         DNS 记录用 PUT 原地更新，不删重建，避免解析出现短暂中断。
         """
         body = self._read_body()
-        service = str(body.get("service") or "").strip()
+        service = _normalize_service(body.get("service"))
         tunnel_id = str(body.get("tunnel_id") or "").strip()
         tunnel_name = str(body.get("tunnel_name") or "").strip()
         if not service:
@@ -2272,13 +2227,16 @@ class PanelHandler(BaseHTTPRequestHandler):
             return
         with db_connect() as conn:
             rows = conn.execute(
-                "SELECT subdomain, zone_name, cf_record_id FROM ingress_rules WHERE zone_id=?", (zone_id,)
+                "SELECT id, subdomain, zone_name, cf_record_id FROM ingress_rules WHERE zone_id=?", (zone_id,)
             ).fetchall()
-        # 用 record_id 与「子域名全名」双重匹配，兼容早期未落 record_id 的情况
-        managed_ids = {r["cf_record_id"] for r in rows if r["cf_record_id"]}
-        managed_names = {(r["subdomain"] + "." + r["zone_name"]).lower() for r in rows}
+        # 用 record_id 与「子域名全名」双重匹配，兼容早期未落 record_id 的情况。
+        # 同时带上规则 id，DNS 页可以直接跳回对应规则。
+        rule_by_record = {r["cf_record_id"]: r["id"] for r in rows if r["cf_record_id"]}
+        rule_by_name = {_rule_hostname(r["subdomain"], r["zone_name"]).lower(): r["id"] for r in rows}
         for rec in records:
-            rec["managed"] = rec["id"] in managed_ids or rec["name"].lower() in managed_names
+            rule_id = rule_by_record.get(rec["id"]) or rule_by_name.get(rec["name"].lower())
+            rec["managed"] = rule_id is not None
+            rec["rule_id"] = str(rule_id) if rule_id is not None else ""
         managed_count = sum(1 for r in records if r["managed"])
         self._send_json({
             "ok": True, "configured": True, "records": records,
@@ -2320,6 +2278,20 @@ class PanelHandler(BaseHTTPRequestHandler):
 
     def _api_connector_status(self) -> None:
         self._send_json(CONNECTOR.status())
+
+    def _api_connector_events(self) -> None:
+        query = parse_qs(urlparse(self.path).query)
+        try:
+            hours = int((query.get("hours") or ["24"])[0])
+        except ValueError:
+            hours = 24
+        try:
+            limit = int((query.get("limit") or ["40"])[0])
+        except ValueError:
+            limit = 40
+        payload = connector_events(hours, limit)
+        payload["ok"] = True
+        self._send_json(payload)
 
     def _api_connector_start(self) -> None:
         body = self._read_body()

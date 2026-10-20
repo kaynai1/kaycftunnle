@@ -12,10 +12,6 @@ IMAGE_DEFAULT_FILE="${COMPOSE_DIR}/env.default"
 DATA_ROOT="${TRIM_PKGVAR}"
 [ -n "$DATA_ROOT" ] || DATA_ROOT="/vol1/@appdata/kaycftunnle"
 
-mkdir -p "${DATA_ROOT}/data" "${DATA_ROOT}/runtime"
-chown -R "${TRIM_USERNAME:-kaycftunnle}:${TRIM_USERNAME:-kaycftunnle}" "${DATA_ROOT}" 2>/dev/null || true
-chmod 700 "${DATA_ROOT}/data" "${DATA_ROOT}/runtime" 2>/dev/null || true
-
 # 镜像名：来自构建时写入的 env.default
 # 兜底值必须与 docker-compose.yaml / build.sh 保持一致，否则会找不到镜像
 IMAGE_NAME="kaycftunnle:latest"
@@ -34,14 +30,20 @@ if [ -z "$PULL_POLICY" ]; then
     esac
 fi
 
-# 端口：保留上一次的配置，保证幂等
+# 端口与数据目录：保留上一次的配置，保证幂等；
+# 升级时必须沿用旧 KAY_CFTUNNLE_DATA，否则会换成新目录、看不到原配置。
 PORT="8567"
 if [ -f "${ENV_FILE}" ]; then
     OLD_PORT=$(grep -E '^KAY_CFTUNNLE_PORT=' "${ENV_FILE}" | cut -d= -f2)
     [ -n "$OLD_PORT" ] && PORT="$OLD_PORT"
+    OLD_DATA=$(grep -E '^KAY_CFTUNNLE_DATA=' "${ENV_FILE}" | cut -d= -f2)
+    [ -n "$OLD_DATA" ] && DATA_ROOT="$OLD_DATA"
 fi
 [ -n "$TRIM_SERVICE_PORT" ] && PORT="$TRIM_SERVICE_PORT"
-true
+
+mkdir -p "${DATA_ROOT}/data" "${DATA_ROOT}/runtime"
+chown -R "${TRIM_USERNAME:-kaycftunnle}:${TRIM_USERNAME:-kaycftunnle}" "${DATA_ROOT}" 2>/dev/null || true
+chmod 700 "${DATA_ROOT}/data" "${DATA_ROOT}/runtime" 2>/dev/null || true
 
 cat > "${ENV_FILE}" <<EOF
 KAY_CFTUNNLE_PORT=${PORT}

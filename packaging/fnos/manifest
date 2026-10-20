@@ -1,12 +1,14 @@
 appname      = kaycftunnle
-version      = 1.3.0
+version      = 1.5.0
 display_name = Kay-cftunnle
 desc         = Cloudflare Tunnel 自托管管理面板：管理隧道、Ingress 规则、DNS 记录，并托管 cloudflared 连接器进程。
 source       = thirdparty
 platform     = all
 
-maintainer     = EasonShu
-maintainer_url = https://github.com/EasonShu
+maintainer      = KayNaI
+maintainer_url  = https://github.com/kaynai1
+distributor     = KayNaI
+distributor_url = https://github.com/kaynai1
 
 os_min_version = 1.0.0
 
@@ -17,4 +19,4 @@ service_port = 8567
 checkport    = true
 ctl_stop     = true
 
-changelog = 总览页新增「开始使用」一键初始化：只填 Token / 子域名 / 本地服务，自动验证凭据、选域名、建隧道、写规则下发路由并启动 cloudflared，全程一条进度日志；下发路由前会先读取隧道现有配置，不再覆盖 Cloudflare 后台手写的规则；修复总览「最近操作」不显示记录。
+changelog = 新增规则行内测试与「全部检查」诊断、连接器稳定性时间线、进程日志级别筛选与关键词搜索、DNS 记录一键复制与跳转规则；子域名前缀可留空直接使用根域名；统一下拉与服务表单样式，修正统计卡对齐和中文等宽字体回退。

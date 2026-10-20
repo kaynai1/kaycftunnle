@@ -244,7 +244,7 @@ kaycftunnle-1.0.0.fpk
     │   └── IMPORT_IMAGE.txt # 未内嵌时附带的导入指引
     ├── ui/
     │   ├── config           # 桌面图标入口（url 类型，端口 8567）
-    │   └── images/icon-{64,256}.png
+    │   └── images/icon_{64,256}.png
     └── config/
         ├── privilege
         └── resource
