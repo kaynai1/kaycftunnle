@@ -1442,7 +1442,9 @@ class PanelHandler(BaseHTTPRequestHandler):
         try:
             self._quick_setup_steps(params, fail, ok_step)
         except Exception as exc:  # noqa: BLE001 - 后台线程不能把异常抛给前端
-            fail("connector", "初始化异常：%s" % exc)
+            steps = QS.snapshot()["steps"]
+            current = next((s["key"] for s in steps if s["state"] == "running"), "connector")
+            fail(current, "初始化异常：%s" % exc)
 
     def _quick_setup_steps(self, params, fail, ok_step) -> None:
         cf = self.cfg["cloudflare"]
