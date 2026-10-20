@@ -349,25 +349,40 @@ class ConnectorManager:
             except CloudflareError as exc:
                 return {"ok": False, "error": "获取隧道令牌失败：" + str(exc)}
 
+            # 令牌必须是 cloudflared 认的 base64(JSON) 串（eyJ...）。
+            # 之前没校验：令牌为空时 cloudflared 会把 "--token ''" 当「没指定隧道」，
+            # 打印 tunnel run 的用法说明后以退出码 0 结束，表现为「启动中→瞬间停止」死循环，
+            # 界面上完全看不出原因。这里提前拦住并给出可执行的提示。
+            token = str(token or "").strip()
+            if not token:
+                return {"ok": False, "error": "Cloudflare 未返回隧道令牌（为空）。"
+                                              "请确认 API Token 具备 Cloudflare Tunnel 的编辑权限，"
+                                              "并检查隧道 %s 是否已被删除" % resolved[:8]}
+            if not token.startswith("eyJ"):
+                return {"ok": False, "error": "隧道令牌格式异常（应以 eyJ 开头，实际以 %r 开头），"
+                                              "疑似 API 返回的不是令牌本身" % token[:12]}
+
             conn_cfg = self.cfg.get("connector", {})
-            protocol = conn_cfg.get("protocol", "http2")
-            ip_version = conn_cfg.get("ip_version", "ipv4")
-            edge_ip = "4" if ip_version == "ipv4" else "6"
+            protocol = str(conn_cfg.get("protocol", "http2") or "http2").strip().lower()
+            if protocol not in ("quic", "http2"):
+                protocol = "http2"
+            ip_version = str(conn_cfg.get("ip_version", "ipv4") or "ipv4").strip().lower()
+            # auto 交给 cloudflared 自己判断，不要再被当成 IPv6
+            edge_ip = {"ipv4": "4", "ipv6": "6"}.get(ip_version, "auto")
 
             self._ensure_runtime_dir()
             # 清空旧日志或追加？选择追加更利于排查，但启动时截尾保留最近 500 行
             self._rotate_log()
             log_fh = open(self.log_path, "a", encoding="utf-8", errors="replace")
 
-            cmd = [
-                binary,
-                "tunnel",
-                "run",
-                "--token", token,
-                "--protocol", protocol,
-                "--edge-ip-version", edge_ip,
-                "--no-autoupdate",
-            ]
+            # 参数顺序遵循官方 Docker 用法 `tunnel --no-autoupdate ... run --token`：
+            # --protocol / --edge-ip-version / --no-autoupdate 都是全局参数，
+            # 必须放在子命令 run 之前，放到 run 之后在部分 cloudflared 版本上会被判为未知参数，
+            # cloudflared 会打印用法说明并以退出码 0 退出（同样表现为秒退）。
+            cmd = [binary, "tunnel", "--no-autoupdate",
+                   "--protocol", protocol,
+                   "--edge-ip-version", edge_ip,
+                   "run", "--token", token]
             kwargs: Dict[str, Any] = {
                 "stdout": log_fh,
                 "stderr": subprocess.STDOUT,
@@ -398,8 +413,36 @@ class ConnectorManager:
                 # 否则界面会一直显示 give_up=True，与实际情况矛盾
                 self._exit_info.pop("give_up", None)
             self._write_pid(self.proc.pid)
-            add_log("connector", "启动隧道 %s（%s / IPv%s）%s"
-                    % (resolved[:8], protocol, edge_ip, "· 自动重试第 %d 次" % self._retry_count if auto and self._retry_count else ""))
+            ip_label = {"4": "IPv4", "6": "IPv6"}.get(edge_ip, "IPv4/IPv6 自动")
+            add_log("connector", "启动隧道 %s（%s / %s）%s"
+                    % (resolved[:8], protocol, ip_label, "· 自动重试第 %d 次" % self._retry_count if auto and self._retry_count else ""))
+
+            # 启动后短暂观察：cloudflared 参数不被接受、令牌无效时会在 1 秒内退出。
+            # 以前直接返回 ok=True，界面停在「启动中…」，只有等看门狗下一轮才发现已经死了，
+            # 用户看到的只是「秒退 + 无限重试」，完全不知道原因。这里立刻把真实原因返回。
+            early = self._wait_early_exit(1.5)
+            if early:
+                rc, reason, fatal = early
+                msg = "cloudflared 启动后立即退出（退出码 %s）：%s" % (rc, reason)
+                add_log("connector", msg, "error")
+                self._exit_info = {
+                    "exit_code": rc,
+                    "exit_at": int(time.time()),
+                    "uptime": 0,
+                    "tunnel_id": resolved,
+                    "reason": reason,
+                }
+                if fatal:
+                    # 令牌/参数类错误：重试多少次结果都一样，直接放弃并保留原因，
+                    # 避免看门狗 5 次无意义重试把日志刷满、还让界面一直"重试中"
+                    self.proc = None
+                    self._close_log_fh()
+                    self._clear_pid()
+                    self.current_tunnel_id = ""
+                    self._exit_info["give_up"] = True
+                # 非致命（网络类）保留 self.proc，交给看门狗按退避继续重试
+                return {"ok": False, "error": msg}
+
             return {
                 "ok": True,
                 "pid": self.proc.pid,
@@ -407,6 +450,43 @@ class ConnectorManager:
                 "protocol": protocol,
                 "ip_version": ip_version,
             }
+
+    def _wait_early_exit(self, seconds: float):
+        """观察 seconds 秒；若进程提前退出，返回 (退出码, 原因, 是否致命)，否则返回 None。"""
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            if self.proc is None or self.proc.poll() is not None:
+                break
+            time.sleep(0.1)
+        if self.proc is None:
+            return None
+        rc = self.proc.poll()
+        if rc is None:
+            return None
+        reason, fatal = self._exit_reason()
+        return rc, reason, fatal
+
+    def _exit_reason(self) -> Tuple[str, bool]:
+        """返回 (可读原因, 是否属于「重试也没用」的配置性错误)。"""
+        try:
+            lines = self._read_logs(40)
+        except Exception:
+            lines = []
+        joined = "\n".join(lines).lower()
+        if "flag provided but not defined" in joined:
+            return ("cloudflared 不认识某个启动参数（flag provided but not defined），"
+                    "参数顺序或版本不匹配", True)
+        if "incorrect usage" in joined or "usage:" in joined:
+            return ("cloudflared 打印了用法说明就退出，说明它没拿到有效令牌"
+                    "（--token 为空或隧道未指定），不是网络问题", True)
+        if "failed to parse token" in joined or "invalid tunnel token" in joined:
+            return "隧道令牌无法解析，请到 Cloudflare 重新复制该隧道的令牌", True
+        if "unauthorized" in joined or " 401" in joined:
+            return "令牌被拒绝（401），隧道可能已删除或令牌已轮换", True
+        if "context deadline exceeded" in joined or "failed to connect to edge" in joined:
+            return ("连不上 Cloudflare 边缘节点；若协议是 QUIC（UDP 7844），"
+                    "很多家宽会封 UDP，把协议改成 http2 再试", False)
+        return (self._tail_reason() or "无日志输出"), False
 
     def _rotate_log(self, keep: int = 500) -> None:
         """启动前保留日志尾部，防止文件无限增长。"""
@@ -525,13 +605,19 @@ class ConnectorManager:
             self.proc = None
             self.started_at = 0.0
             self._clear_pid()
-            reason = self._tail_reason()
+            reason, fatal = self._exit_reason()
+            self._exit_info["reason"] = reason
             add_log("connector", "进程意外退出（退出码 %s，运行 %ds）：%s"
                     % (rc, uptime, reason or "无日志"), "error")
             max_retry = int(conn_cfg.get("watchdog_max_retry", 5) or 5)
             # 运行足够久才挂，说明隧道本身是健康的，计数归零避免长期累积
             if uptime >= STABLE_RUN_SECONDS:
                 self._retry_count = 0
+            # 启动即挂 + 原因是令牌/参数这类配置问题：重试多少次都一样，直接放弃
+            if fatal and uptime <= 10:
+                add_log("connector", "退出原因是配置问题，已停止自动拉起：" + reason, "error")
+                self._exit_info["give_up"] = True
+                return
             if self._retry_count >= max_retry:
                 add_log("connector", "自动重试已达上限（%d 次），已停止拉起" % max_retry, "error")
                 self._exit_info["give_up"] = True

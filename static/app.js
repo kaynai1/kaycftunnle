@@ -331,6 +331,10 @@
         formatClock(exit.exit_at) + " · 退出码 " + esc(exit.exit_code) +
         " · 运行 " + formatDuration(exit.uptime || 0) + giveUp + '</span></div>');
     }
+    if (exit.reason) {
+      rows.push('<div class="wd-row"><span class="wd-k">退出原因</span>' +
+        '<span class="wd-v wd-bad">' + esc(exit.reason) + '</span></div>');
+    }
     if (w.last_restart_at) {
       rows.push('<div class="wd-row"><span class="wd-k">最近自动拉起</span><span class="wd-v">' +
         formatClock(w.last_restart_at) + '</span></div>');
