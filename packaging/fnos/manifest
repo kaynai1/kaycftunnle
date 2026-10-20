@@ -1,5 +1,5 @@
 appname      = kaycftunnle
-version      = 1.2.1
+version      = 1.3.0
 display_name = Kay-cftunnle
 desc         = Cloudflare Tunnel 自托管管理面板：管理隧道、Ingress 规则、DNS 记录，并托管 cloudflared 连接器进程。
 source       = thirdparty
@@ -17,4 +17,4 @@ service_port = 8567
 checkport    = true
 ctl_stop     = true
 
-changelog = Ingress 规则整块从「域名与 DNS」页移到「隧道」页，按隧道维护；第三个标签改名「域名与 DNS」；「添加规则」按钮增加读取 Zone 与隧道的加载态反馈。
+changelog = 总览页新增「开始使用」一键初始化：只填 Token / 子域名 / 本地服务，自动验证凭据、选域名、建隧道、写规则下发路由并启动 cloudflared，全程一条进度日志；下发路由前会先读取隧道现有配置，不再覆盖 Cloudflare 后台手写的规则；修复总览「最近操作」不显示记录。

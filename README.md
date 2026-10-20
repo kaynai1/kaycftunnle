@@ -40,6 +40,21 @@ python server.py --port 8567     # 或 python3
 python server.py --check         # 只跑一次自检，打印状态 JSON
 ```
 
+## 三步跑通（总览页「开始使用」）
+
+新装第一次打开面板，在**总览 → 开始使用**里只填三样：API Token、子域名前缀（如 `nas`）、本地服务（端口 `8000` 或完整地址 `ssh://127.0.0.1:22`），点**一键初始化**即可。面板按顺序自动执行六步，全程一条进度日志，哪步不成立就停在哪步并给出原因：
+
+1. 验证 Token（顺带把 Token 存进 `workbench.json`）
+2. 自动确定 Account ID（单账号直接回填）
+3. 选域名：只有一个 Zone 自动选中，多个 Zone 会让你在下拉框里挑一次
+4. 复用已有隧道（默认隧道优先），一条都没有才新建
+5. 写规则：建 CNAME + 把路由整份下发到隧道
+6. 启动 cloudflared 并记为该隧道的默认连接
+
+成功后卡片下方直接给出可访问的 `https://子域名.域名`。同名规则再点一次会按新的服务地址覆盖，**可当作一键修复**用。想细调（换隧道、改协议、看令牌）再进「隧道 / 域名与 DNS / 连接器」标签页。
+
+> 下发隧道路由前，面板会先读取该隧道当前配置，**保留 Cloudflare 后台手写的 hostname**，只覆盖面板自己管理的同名规则；读取失败则取消下发，避免误删。
+
 ## 配置 Cloudflare 凭据
 
 在 [Cloudflare API Tokens](https://dash.cloudflare.com/profile/api-tokens) 创建自定义 Token，权限：
@@ -85,6 +100,7 @@ cloudflared 运行在 NAS 上可能需要连续不间断。服务端内置看门
 | `POST /api/cloudflare/verify` | 测试配置，返回结构化报告（Token/账号/权限） |
 | `GET /api/cloudflare/zones` | 域名列表（M3 DNS 页使用） |
 | `POST /api/cloudflare/zones/primary` | 设置当前目标 Zone（M3） |
+| `POST /api/setup/quick` · `GET /api/setup/quick` | 总览页一键初始化：POST 启动后台任务，GET 轮询六步进度与结果域名（`need_zone` 时附 Zone 列表供选择） |
 | `GET /api/system/settings` · `POST /api/system/settings` | 连接器设置（自动连接 / 协议 / IP 版本 / 看门狗） |
 | `GET /api/system/info` | 面板版本、运行时长、数据目录、cloudflared 版本、服务进程 |
 | `GET /api/system/selfcheck` | 版本自检：代码指纹、server.py 修改时间、关键路由是否已注册 |

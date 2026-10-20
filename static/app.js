@@ -179,6 +179,7 @@
 
   function logout() {
     if (liveChipTimer) { clearInterval(liveChipTimer); liveChipTimer = 0; }
+    qsStopPoll();
     panelEntered = false;
     api("POST", "/auth/logout").catch(function () {}).then(function () {
       collapseAll();
@@ -204,7 +205,7 @@
     document.querySelectorAll(".view").forEach(function (v) {
       v.classList.toggle("active", v.id === "view-" + route);
     });
-    if (route === "overview") { refreshOverview(); loadSystemInfo(); }
+    if (route === "overview") { refreshOverview(); loadSystemInfo(); refreshQuickSetup(); }
     else if (route === "tunnels") { refreshTunnels(); refreshIngresses(); }
     else if (route === "dns") { refreshZones(); refreshDnsRecords(); }
     else if (route === "connector") { refreshConnector(); loadSystemSettings(); }
@@ -264,7 +265,6 @@
     api("GET", "/auth/me").then(function (me) {
       $("userName").textContent = me.user.username;
       $("userAvatar").textContent = (me.user.username || "A").charAt(0).toUpperCase();
-      $("cfNotice").hidden = !!me.cloudflare_configured;
       if (!me.cloudflare_configured) {
         $("statZone").textContent = "未配置";
         $("statTunnels").textContent = "–";
@@ -294,7 +294,7 @@
       ]);
     })
       .then(function () {
-        return api("GET", "/logs?limit=6").then(renderLogs).catch(function () {});
+        return api("GET", "/logs?limit=6").then(function (d) { renderLogs((d && d.logs) || []); }).catch(function () {});
       })
       .catch(function () { if (panelEntered) logout(); });
   }
@@ -1337,23 +1337,105 @@
     }).join("");
   }
 
-  /* ------------------------------------------------------------ 快速操作（总览页） */
-  function onQuickAction(ev) {
-    var btn = ev.target.closest("[data-action]");
-    if (!btn) return;
-    var action = btn.getAttribute("data-action");
-    if (action === "settings") {
-      location.hash = "#/settings";
-    } else if (action === "tunnel") {
-      location.hash = "#/tunnels";
-      setTimeout(newTunnel, 60);
-    } else if (action === "connector") {
-      location.hash = "#/connector";
-      setTimeout(function () { startConnector(); }, 60);
-    } else if (action === "ingress") {
-      location.hash = "#/tunnels";
-      setTimeout(newIngress, 60);
+  /* ------------------------------------------------------------ 一键初始化（总览页） */
+
+  var qsTimer = 0;
+  var QS_TIP_DEFAULT = "同名规则会被覆盖成新的服务地址，可放心再点一次。";
+
+  function qsStopPoll() {
+    if (qsTimer) { clearTimeout(qsTimer); qsTimer = 0; }
+  }
+
+  function qsFillZones(zones) {
+    var wrap = $("qsZoneWrap"), sel = $("qsZone");
+    var cur = sel.value;
+    wrap.hidden = false;
+    sel.innerHTML = (zones || []).map(function (z) {
+      return '<option value="' + esc(z.id) + '">' + esc(z.name) + "</option>";
+    }).join("");
+    if (cur && (zones || []).some(function (z) { return z.id === cur; })) sel.value = cur;
+  }
+
+  function qsShowResult(host) {
+    $("qsResult").hidden = false;
+    $("qsLink").textContent = "https://" + host;
+    $("qsLink").href = "https://" + host;
+  }
+
+  function qsRender(state) {
+    var steps = state.steps || [];
+    $("qsSteps").hidden = !steps.length;
+    $("qsSteps").innerHTML = steps.map(function (s) {
+      var mark = s.state === "done" ? "✓" : (s.state === "failed" ? "✕" : (s.state === "running" ? "●" : "○"));
+      var detail = s.detail || (s.state === "running" ? "执行中…" : "");
+      return '<li class="qs-step qs-' + esc(s.state) + '">' +
+        '<span class="qs-mark">' + mark + "</span>" +
+        '<span class="qs-lbl">' + esc(s.label) + "</span>" +
+        '<span class="qs-detail">' + esc(detail) + "</span>" +
+        "</li>";
+    }).join("");
+
+    var failed = steps.filter(function (s) { return s.state === "failed"; })[0];
+    var tip = $("qsTip");
+    tip.textContent = failed ? failed.detail : QS_TIP_DEFAULT;
+    tip.classList.toggle("qs-tip-bad", !!failed);
+
+    if (state.need_zone && (state.zones || []).length) qsFillZones(state.zones);
+    if (state.running) {
+      $("qsResult").hidden = true;
+      $("qsRunBtn").disabled = true;
+      $("qsRunBtn").textContent = "执行中…";
+    } else {
+      $("qsRunBtn").disabled = false;
+      $("qsRunBtn").textContent = "一键初始化";
+      if (state.done && state.hostname) {
+        qsShowResult(state.hostname);
+        // 隔了一段时间再进来，那个域名可能早删了，别还写成「现在可以访问」
+        $("qsResultK").textContent =
+          (state.finished_at && Date.now() / 1000 - state.finished_at > 180) ? "上次初始化结果" : "现在可以访问";
+      } else {
+        $("qsResult").hidden = true;
+      }
     }
+  }
+
+  function qsPoll() {
+    qsStopPoll();
+    qsTimer = setTimeout(function () {
+      qsTimer = 0;
+      api("GET", "/setup/quick").then(function (st) {
+        qsRender(st);
+        if (st.running) { qsPoll(); return; }
+        if (st.done) { refreshOverview(); refreshLiveChip(); }
+        else if (st.error) toast(st.error);
+      }).catch(function () { /* 状态接口偶尔抽风，下一轮再试 */ });
+    }, 700);
+  }
+
+  function refreshQuickSetup() {
+    api("GET", "/setup/quick").then(function (st) {
+      qsRender(st);
+      if (st.running) qsPoll();
+    }).catch(function () { /* 未登录或旧版本没有该接口 */ });
+  }
+
+  function runQuickSetup() {
+    var body = {
+      api_token: $("qsToken").value.trim(),
+      subdomain: $("qsSub").value.trim().toLowerCase(),
+      service: $("qsService").value.trim(),
+      zone_id: $("qsZoneWrap").hidden ? "" : $("qsZone").value
+    };
+    if (!body.subdomain) { toast("请填写子域名前缀，例如 nas"); return; }
+    if (!body.service) { toast("请填写本地服务，例如 8000 或 ssh://127.0.0.1:22"); return; }
+    $("qsResult").hidden = true;
+    api("POST", "/setup/quick", body).then(function (st) {
+      qsRender(st);
+      qsPoll();
+    }).catch(function (err) {
+      toast(err.message);
+      refreshQuickSetup();
+    });
   }
 
   /* ------------------------------------------------------------ 启动引导 */
@@ -1407,8 +1489,11 @@
     $("saveDefaultTunnelBtn").addEventListener("click", saveDefaultTunnel);
     $("clearConnectorLogsBtn").addEventListener("click", clearConnectorLogs);
 
-    // 总览页快速操作
-    $("quickActions").addEventListener("click", onQuickAction);
+    // 总览页一键初始化
+    $("qsRunBtn").addEventListener("click", runQuickSetup);
+    $("qsCopyBtn").addEventListener("click", function () {
+      copyText($("qsLink").getAttribute("href") || "");
+    });
 
     // 页内表单：取消按钮收起对应面板
     document.addEventListener("click", function (ev) {

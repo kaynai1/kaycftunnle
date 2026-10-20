@@ -70,9 +70,9 @@ CONFIG_PATH = DATA_DIR / "workbench.json"
 DB_PATH = DATA_DIR / "kay-cftunnle.sqlite3"
 SESSION_COOKIE = "kay_cftunnle_session"
 
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.3.0"
 # 静态资源版本号：改前端后递增，用于破浏览器缓存（需与 index.html 的 ?v= 保持一致）
-STATIC_REV = 22
+STATIC_REV = 24
 START_TIME = time.time()
 SESSION_MAX_AGE = 7 * 24 * 60 * 60
 # 连接器运行超过该秒数视为「稳定运行」，看门狗重试计数归零
@@ -238,6 +238,108 @@ def update_cloudflare_settings(cfg: Dict[str, Any], api_token: str = "",
         if primary_zone is not None:
             cf["primary_zone"] = primary_zone.strip()
         save_config(cfg)
+
+
+# ------------------------------------------------------------------ 一键初始化（总览页「开始使用」）
+
+QS_STEPS = (
+    ("token", "验证 Cloudflare API Token"),
+    ("account", "确定 Account ID"),
+    ("zone", "选择域名 Zone"),
+    ("tunnel", "准备 Cloudflare 隧道"),
+    ("route", "写规则并下发路由"),
+    ("connector", "启动 cloudflared 连接器"),
+)
+
+
+def _normalize_service(raw: Any) -> str:
+    """把「端口号」补成本机 HTTP 地址；填了完整地址的原样放行，交给 _service_ok 校验。"""
+    s = str(raw or "").strip()
+    if re.fullmatch(r"[1-9][0-9]{0,4}", s):
+        return "http://127.0.0.1:" + s
+    if re.fullmatch(r"[A-Za-z0-9._-]+:[0-9]{1,5}", s):
+        return "http://" + s
+    return s
+
+
+class QuickSetup:
+    """后台任务状态：六步要跑好几个 Cloudflare 往返，同步返回会把前端卡到超时，
+    所以真正的执行放线程里，前端轮询这份状态渲染进度日志。"""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.running = False
+        self.ok: Optional[bool] = None
+        self.error = ""
+        self.hostname = ""
+        self.tunnel_id = ""
+        self.tunnel_name = ""
+        self.zone_name = ""
+        self.need_zone = False
+        self.zones: List[Dict[str, str]] = []
+        self.steps: List[Dict[str, str]] = []
+        self.started_at = 0
+        self.finished_at = 0
+
+    def begin(self) -> bool:
+        with self.lock:
+            if self.running:
+                return False
+            self.ok = None
+            self.error = ""
+            self.hostname = ""
+            self.tunnel_id = ""
+            self.tunnel_name = ""
+            self.zone_name = ""
+            self.need_zone = False
+            self.zones = []
+            self.steps = [{"key": k, "label": l, "state": "pending", "detail": ""} for k, l in QS_STEPS]
+            self.started_at = int(time.time())
+            self.finished_at = 0
+            self.running = True
+            return True
+
+    def set(self, key: str, state: str, detail: str = "") -> None:
+        with self.lock:
+            for st in self.steps:
+                if st["key"] == key:
+                    st["state"] = state
+                    if detail:
+                        st["detail"] = detail
+                    break
+
+    def set_zones(self, zones: List[Dict[str, str]], need_choice: bool = False) -> None:
+        with self.lock:
+            self.zones = [{"id": z.get("id", ""), "name": z.get("name", "")} for z in zones]
+            self.need_zone = bool(need_choice)
+
+    def finish(self, ok: bool, error: str = "") -> None:
+        with self.lock:
+            self.running = False
+            self.ok = ok
+            self.error = error
+            self.finished_at = int(time.time())
+
+    def snapshot(self) -> Dict[str, Any]:
+        with self.lock:
+            return {
+                "ok": True,
+                "running": self.running,
+                "done": self.ok,
+                "error": self.error,
+                "hostname": self.hostname,
+                "tunnel_id": self.tunnel_id,
+                "tunnel_name": self.tunnel_name,
+                "zone_name": self.zone_name,
+                "need_zone": self.need_zone,
+                "zones": list(self.zones),
+                "steps": [dict(s) for s in self.steps],
+                "started_at": self.started_at,
+                "finished_at": self.finished_at,
+            }
+
+
+QS = QuickSetup()
 
 
 # ------------------------------------------------------------------ 连接器（M4 cloudflared 进程监管）
@@ -1196,6 +1298,12 @@ class PanelHandler(BaseHTTPRequestHandler):
         if route == "/cloudflare/status" and method == "GET":
             self._api_cf_status()
             return
+        if route == "/setup/quick" and method == "POST":
+            self._api_setup_quick_start()
+            return
+        if route == "/setup/quick" and method == "GET":
+            self._send_json(QS.snapshot())
+            return
         if route == "/cloudflare/settings" and method == "POST":
             self._api_cf_settings_save()
             return
@@ -1287,6 +1395,213 @@ class PanelHandler(BaseHTTPRequestHandler):
             % (route, method),
             log=True,
         )
+
+    # ---- 一键初始化 ----
+
+    def _api_setup_quick_start(self) -> None:
+        body = self._read_body()
+        subdomain = str(body.get("subdomain") or "").strip().lower()
+        service = _normalize_service(body.get("service"))
+        if not subdomain:
+            self._send_error_json(400, "请填写子域名前缀")
+            return
+        if subdomain not in ("@", "*") and not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?", subdomain):
+            self._send_error_json(400, "子域名只能包含小写字母、数字与连字符，1-63 位；@ 为根域名")
+            return
+        if not service:
+            self._send_error_json(400, "请填写本地服务：端口号（如 8000）或完整地址（如 ssh://127.0.0.1:22）")
+            return
+        if not _service_ok(service):
+            self._send_error_json(400, "本地服务地址协议不受支持（http/https/tcp/tls/ssh/rdp/unix 等）")
+            return
+        params = {
+            "api_token": str(body.get("api_token") or "").strip(),
+            "subdomain": subdomain,
+            "service": service,
+            "zone_id": str(body.get("zone_id") or "").strip(),
+        }
+        if not QS.begin():
+            self._send_error_json(409, "上一次初始化仍在进行，请等它结束后再试")
+            return
+        threading.Thread(target=self._run_quick_setup, args=(params,), daemon=True).start()
+        add_log("setup", "开始一键初始化：%s → %s" % (subdomain, service))
+        self._send_json(QS.snapshot())
+
+    def _run_quick_setup(self, params: Dict[str, Any]) -> None:
+        """按六个一步到位跑完；任何一步不成立就停下，把原因留在该步的 detail 里。"""
+        labels = dict(QS_STEPS)
+
+        def fail(key: str, detail: str) -> None:
+            QS.set(key, "failed", detail)
+            QS.finish(False, detail)
+            add_log("setup", "初始化停在「%s」：%s" % (labels[key], detail), "warn")
+
+        def ok_step(key: str, detail: str = "") -> None:
+            QS.set(key, "done", detail)
+
+        try:
+            self._quick_setup_steps(params, fail, ok_step)
+        except Exception as exc:  # noqa: BLE001 - 后台线程不能把异常抛给前端
+            fail("connector", "初始化异常：%s" % exc)
+
+    def _quick_setup_steps(self, params, fail, ok_step) -> None:
+        cf = self.cfg["cloudflare"]
+
+        # 1) Token
+        QS.set("token", "running")
+        token = params["api_token"] or str(cf.get("api_token") or "").strip()
+        if not token:
+            fail("token", "请填写 Cloudflare API Token")
+            return
+        client = CloudflareClient(token, str(cf.get("account_id") or "").strip())
+        try:
+            client.verify_token()
+        except CloudflareError as exc:
+            fail("token", "Token 验证失败：%s（检查 Token 是否过期、权限是否勾选）" % exc)
+            return
+        update_cloudflare_settings(self.cfg, token)
+        ok_step("token", "有效")
+
+        # 2) Account
+        QS.set("account", "running")
+        account = client.account_id
+        accounts, acct_error = [], ""
+        try:
+            accounts = client.list_accounts()
+        except CloudflareError as exc:
+            acct_error = str(exc)
+        if account and accounts and all(a["id"] != account for a in accounts):
+            account = ""  # 旧值不在这个 Token 可见范围里，重新确定
+        if not account and len(accounts) == 1:
+            account = accounts[0]["id"]
+        if not account and len(accounts) > 1:
+            fail("account", "该 Token 可见多个账号（%s），请到「设置」页指定 Account ID"
+                 % "、".join(a["name"] or a["id"] for a in accounts))
+            return
+        if not account:
+            fail("account", "未能自动获取 Account ID%s，请到「设置」页手动填写"
+                 % ("" if not acct_error else "（%s）" % acct_error))
+            return
+        client.account_id = account
+        update_cloudflare_settings(self.cfg, "", account)
+        ok_step("account", account)
+
+        # 3) Zone
+        QS.set("zone", "running")
+        try:
+            zones = client.list_zones()
+        except CloudflareError as exc:
+            fail("zone", "域名列表获取失败：%s（检查「区域 → 区域读取」权限）" % exc)
+            return
+        if not zones:
+            fail("zone", "该账号下没有可用域名，请先在 Cloudflare 添加并托管域名")
+            return
+        chosen, why = None, ""
+        want = params["zone_id"] or cf.get("primary_zone") or ""
+        for z in zones:
+            if want and z["id"] == want:
+                chosen = z
+                why = "按本次选择" if params["zone_id"] else "沿用已选域名"
+                break
+        if chosen is None and len(zones) == 1:
+            chosen, why = zones[0], "账号下唯一域名"
+        if chosen is None:
+            QS.set_zones(zones, True)
+            fail("zone", "检测到 %d 个域名，请在下方选一个再点「开始使用」" % len(zones))
+            return
+        QS.set_zones(zones)
+        update_cloudflare_settings(self.cfg, "", None, chosen["id"])
+        ok_step("zone", "%s（%s）" % (chosen["name"], why))
+
+        # 4) 隧道：能复用就复用，一条都没有才新建
+        QS.set("tunnel", "running")
+        try:
+            tunnels = client.list_tunnels()
+        except CloudflareError as exc:
+            fail("tunnel", "隧道列表获取失败：%s（检查「账户 → Cloudflare Tunnel」权限）" % exc)
+            return
+        preferred = str((self.cfg.get("connector") or {}).get("default_tunnel_id") or "").strip()
+        tunnel = next((t for t in tunnels if t["id"] == preferred), None)
+        if tunnel is None and tunnels:
+            tunnel = tunnels[0]
+        if tunnel is not None:
+            ok_step("tunnel", "复用已有隧道 %s" % (tunnel.get("name") or tunnel["id"][:8]))
+        else:
+            base = params["subdomain"]
+            if not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?", base):
+                base = "kay-cftunnle"
+            name = base
+            try:
+                created = client.create_tunnel(name)
+            except CloudflareError as exc:
+                fail("tunnel", "创建隧道失败：%s" % exc)
+                return
+            if not isinstance(created, dict) or not created.get("id"):
+                fail("tunnel", "Cloudflare 未返回新建隧道的 ID")
+                return
+            tunnel = {"id": created["id"], "name": created.get("name") or name}
+            ok_step("tunnel", "新建隧道 %s" % tunnel["name"])
+
+        # 5) 规则：DNS CNAME + 隧道路由，两步都齐了域名才打得开
+        QS.set("route", "running")
+        subdomain = params["subdomain"]
+        service = params["service"]
+        full_name = _rule_hostname(subdomain, chosen["name"])
+        cname_target = tunnel["id"] + ".cfargotunnel.com"
+        try:
+            record_id = self._upsert_dns_cname(client, chosen["id"], full_name, cname_target)
+        except CloudflareError as exc:
+            fail("route", "创建 CNAME 记录失败：%s" % exc)
+            return
+        now = int(time.time())
+        with db_connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM ingress_rules WHERE subdomain=? AND zone_id=?",
+                (subdomain, chosen["id"]),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO ingress_rules(subdomain, zone_id, zone_name, tunnel_id, tunnel_name, "
+                    "service, cf_record_id, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (subdomain, chosen["id"], chosen["name"], tunnel["id"], tunnel.get("name", ""),
+                     service, record_id, now, now),
+                )
+            else:
+                conn.execute(
+                    "UPDATE ingress_rules SET tunnel_id=?, tunnel_name=?, zone_name=?, service=?, "
+                    "cf_record_id=?, updated_at=? WHERE id=?",
+                    (tunnel["id"], tunnel.get("name", ""), chosen["name"], service, record_id, now, row["id"]),
+                )
+        synced, sync_error = self._sync_tunnel_ingress(client, tunnel["id"])
+        if not synced:
+            fail("route", "隧道路由下发失败：%s" % sync_error)
+            return
+        with QS.lock:
+            QS.hostname = full_name
+            QS.tunnel_id = tunnel["id"]
+            QS.tunnel_name = tunnel.get("name", "")
+            QS.zone_name = chosen["name"]
+        ok_step("route", "%s → %s" % (full_name, service))
+
+        # 6) 连接器
+        QS.set("connector", "running")
+        with _CFG_LOCK:
+            self.cfg.setdefault("connector", {})["default_tunnel_id"] = tunnel["id"]
+            save_config(self.cfg)
+        status = CONNECTOR.status()
+        if status.get("running") and status.get("current_tunnel_id") == tunnel["id"]:
+            ok_step("connector", "cloudflared 已在跑这条隧道")
+        else:
+            if status.get("running"):
+                CONNECTOR.stop(by_user=False)
+            CONNECTOR.reset_watchdog()
+            result = CONNECTOR.start(tunnel["id"])
+            if not result.get("ok"):
+                fail("connector", result.get("error") or "cloudflared 启动失败")
+                return
+            ok_step("connector", "已启动，首次建立连接约需几秒")
+        QS.finish(True)
+        add_log("setup", "一键初始化完成：%s → %s" % (QS.hostname, params["service"]))
 
     # ---- Cloudflare 凭据 ----
 
@@ -1743,22 +2058,41 @@ class PanelHandler(BaseHTTPRequestHandler):
             add_log("ingress", "DNS 记录并发冲突，已改为原地更新：" + full_name, "warn")
             return race.get("id") or ""
 
-    def _sync_tunnel_ingress(self, client, tunnel_id: str):
-        """把该隧道的全部本地规则整份下发到 Cloudflare 远程配置。
+    def _sync_tunnel_ingress(self, client, tunnel_id: str, drop=()):
+        """把该隧道的路由整份下发到 Cloudflare 远程配置。
 
         只建 DNS CNAME 是不够的：边缘按子域名找到隧道后，还要在隧道 config 的
         ingress 里命中同一条 hostname 才会回源，否则请求直接 1033/502。
         Cloudflare 要求最后一条是不带 hostname 的兜底规则。
+
+        PUT 是整份覆盖，会连带删掉用户在 Cloudflare 后台手写的路由，所以下发前先读
+        一次当前配置：面板没建过的 hostname 原样保留（同名以本地为准）。drop 用来
+        点名「这次就是要把这条删掉」（删除规则 / 换隧道），否则被删的 hostname 会被
+        当成后台手写路由而原地复活。
         """
         if not tunnel_id:
             return False, "缺少隧道 ID"
+        try:
+            remote = client.get_tunnel_ingress(tunnel_id)
+        except CloudflareError as exc:
+            return False, "读取隧道当前路由失败，已取消下发（避免覆盖后台已有配置）：%s" % exc
+        dropped = {str(h).strip().lower() for h in drop if h}
         with db_connect() as conn:
             rows = conn.execute(
                 "SELECT subdomain, zone_name, service FROM ingress_rules "
                 "WHERE tunnel_id=? ORDER BY id",
                 (tunnel_id,),
             ).fetchall()
+        local_hosts = {_rule_hostname(r["subdomain"], r["zone_name"]).lower() for r in rows}
         ingress = []
+        kept = 0
+        for rule in remote:
+            host = str(rule.get("hostname") or "").strip().lower()
+            service = str(rule.get("service") or "").strip()
+            if not host or not service or host in local_hosts or host in dropped:
+                continue
+            ingress.append({"hostname": host, "service": service})  # 后台手写的路由，面板不动它
+            kept += 1
         for r in rows:
             hostname = _rule_hostname(r["subdomain"], r["zone_name"])
             if hostname:
@@ -1769,7 +2103,8 @@ class PanelHandler(BaseHTTPRequestHandler):
         except CloudflareError as exc:
             add_log("ingress", "隧道路由下发失败：" + str(exc), "error")
             return False, str(exc)
-        add_log("ingress", "已下发 %d 条路由到隧道 %s" % (len(ingress) - 1, tunnel_id[:8]))
+        add_log("ingress", "已下发 %d 条路由到隧道 %s（另保留后台路由 %d 条）"
+                % (len(rows), tunnel_id[:8], kept))
         return True, ""
 
     def _api_ingress_sync(self) -> None:
@@ -1913,8 +2248,8 @@ class PanelHandler(BaseHTTPRequestHandler):
         add_log("ingress", "更新规则 %s → %s" % (full_name, service))
         synced, sync_error = self._sync_tunnel_ingress(client, new_tunnel_id)
         if row["tunnel_id"] and row["tunnel_id"] != new_tunnel_id:
-            # 换隧道后旧隧道里仍留着这条 hostname，需要把旧隧道的路由也重下一遍
-            self._sync_tunnel_ingress(client, row["tunnel_id"])
+            # 换隧道后旧隧道里仍留着这条 hostname，要把它从旧隧道路由里摘掉再重下
+            self._sync_tunnel_ingress(client, row["tunnel_id"], drop=(full_name,))
         self._send_json({"ok": True, "ingress": {
             "id": ingress_id, "full_name": full_name, "service": service,
             "tunnel_id": new_tunnel_id, "tunnel_name": new_tunnel_name,
@@ -1973,8 +2308,10 @@ class PanelHandler(BaseHTTPRequestHandler):
                 # 继续删除本地记录，避免卡死
         with db_connect() as conn:
             conn.execute("DELETE FROM ingress_rules WHERE id=?", (ingress_id,))
-        add_log("ingress", "删除 %s.%s → %s" % (row["subdomain"], row["zone_name"], row["service"]))
-        synced, sync_error = self._sync_tunnel_ingress(client, row["tunnel_id"])
+        add_log("ingress", "删除 %s → %s" % (_rule_hostname(row["subdomain"], row["zone_name"]), row["service"]))
+        # 点名要删的 hostname，否则它会被当成后台手写路由原地保留下来
+        synced, sync_error = self._sync_tunnel_ingress(
+            client, row["tunnel_id"], drop=(_rule_hostname(row["subdomain"], row["zone_name"]),))
         self._send_json({"ok": True, "synced": synced, "sync_error": sync_error})
 
     # ---- 连接器（M4） ----

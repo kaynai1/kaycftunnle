@@ -20,9 +20,9 @@
   <meta name="color-scheme" content="light dark">
   <meta name="description" content="Kay-cftunnle 面板：自托管的 Cloudflare Tunnel 管理工具，API Token 托管、隧道管理、Ingress 映射、DNS 维护与 cloudflared 连接器控制，一键部署飞牛 NAS。">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23FF6B35'/%3E%3Ctext x='16' y='23' font-size='18' text-anchor='middle' fill='white'%3E%F0%9F%9A%87%3C/text%3E%3C/svg%3E">
-  <script src="/theme.js?v=22"></script>
-  <link rel="stylesheet" href="/theme.css?v=22">
-  <link rel="stylesheet" href="/styles.css?v=22">
+  <script src="/theme.js?v=24"></script>
+  <link rel="stylesheet" href="/theme.css?v=24">
+  <link rel="stylesheet" href="/styles.css?v=24">
 </head>
 <body>
 
@@ -95,12 +95,48 @@
         <div class="page-head">
           <div class="page-eyebrow">01 / Overview</div>
           <h1 class="page-title">总览</h1>
-          <p class="page-sub">一眼确认隧道、规则与连接器是否都在位。</p>
+          <p class="page-sub">填三项就能跑通第一条隧道；下面的数字是当前状态，细节到各标签页微调。</p>
         </div>
 
-        <div class="notice" id="cfNotice" hidden>
-          <span class="notice-ico">!</span>
-          <span>尚未配置 Cloudflare API Token，隧道与 DNS 功能不可用。请先到<b>设置</b>页填入 Token。</span>
+        <div class="card card-hero">
+          <div class="card-head">
+            <div class="card-head-txt">
+              <h2 class="card-title">开始使用</h2>
+              <p class="card-sub">验证 Token → 选域名 → 备隧道 → 写规则下发路由 → 启动连接器，一次点完。</p>
+            </div>
+          </div>
+          <div class="form-grid">
+            <div class="field">
+              <label class="field-label" for="qsToken">Cloudflare API Token</label>
+              <input class="field-input" id="qsToken" type="password" placeholder="留空＝使用已保存的 Token" autocomplete="off">
+              <div class="form-hint">需要「区域读取 + 编辑、Cloudflare Tunnel 编辑」权限。</div>
+            </div>
+            <div class="field">
+              <label class="field-label" for="qsSub">子域名前缀</label>
+              <input class="field-input" id="qsSub" type="text" placeholder="例如 nas" autocomplete="off">
+              <div class="form-hint">小写字母 / 数字 / 连字符；@ 为根域名。</div>
+            </div>
+            <div class="field">
+              <label class="field-label" for="qsService">本地服务</label>
+              <input class="field-input" id="qsService" type="text" placeholder="8000 或 ssh://127.0.0.1:22" autocomplete="off">
+              <div class="form-hint">只填端口按本机 HTTP 处理；其它协议写完整地址。</div>
+            </div>
+            <div class="field" id="qsZoneWrap" hidden>
+              <label class="field-label" for="qsZone">目标域名</label>
+              <select class="field-input" id="qsZone"></select>
+              <div class="form-hint">账号下有多个域名时才需要选。</div>
+            </div>
+          </div>
+          <div class="qs-bar">
+            <button class="btn btn-primary btn-auto" type="button" id="qsRunBtn">一键初始化</button>
+            <span class="qs-tip" id="qsTip">同名规则会被覆盖成新的服务地址，可放心再点一次。</span>
+          </div>
+          <ol class="qs-steps" id="qsSteps" hidden></ol>
+          <div class="qs-result" id="qsResult" hidden>
+            <span class="qs-result-k" id="qsResultK">现在可以访问</span>
+            <a class="qs-result-v" id="qsLink" href="#" target="_blank" rel="noopener">–</a>
+            <button class="btn btn-ghost btn-sm btn-auto" type="button" id="qsCopyBtn">复制地址</button>
+          </div>
         </div>
 
         <div class="stat-grid">
@@ -108,37 +144,6 @@
           <div class="stat"><span class="stat-k">Ingress 规则</span><span class="stat-n" id="statRules">–</span><span class="stat-s">子域名 → 本地服务</span></div>
           <div class="stat"><span class="stat-k">连接器</span><span class="stat-n stat-n-sm" id="statConnector">–</span><span class="stat-s">cloudflared 进程</span></div>
           <div class="stat"><span class="stat-k">默认 Zone</span><span class="stat-n stat-n-sm" id="statZone">–</span><span class="stat-s">Ingress 取此域名</span></div>
-        </div>
-
-        <div class="card">
-          <div class="card-head">
-            <div class="card-head-txt">
-              <h2 class="card-title">快速操作</h2>
-              <p class="card-sub">按部署顺序排列，四个动作即可跑通一条隧道。</p>
-            </div>
-          </div>
-          <div class="quick-actions" id="quickActions">
-            <button class="qa-btn" type="button" data-action="settings">
-              <span class="qa-ico">1</span>
-              <span class="qa-t">配置 Token</span>
-              <span class="qa-s">前往设置页填写 Cloudflare 凭据</span>
-            </button>
-            <button class="qa-btn" type="button" data-action="tunnel">
-              <span class="qa-ico">2</span>
-              <span class="qa-t">新建隧道</span>
-              <span class="qa-s">在 Cloudflare 创建命名隧道</span>
-            </button>
-            <button class="qa-btn" type="button" data-action="ingress">
-              <span class="qa-ico">3</span>
-              <span class="qa-t">添加规则</span>
-              <span class="qa-s">把子域名映射到 NAS 本地服务</span>
-            </button>
-            <button class="qa-btn" type="button" data-action="connector">
-              <span class="qa-ico">4</span>
-              <span class="qa-t">启动连接器</span>
-              <span class="qa-s">运行 cloudflared 连接默认隧道</span>
-            </button>
-          </div>
         </div>
 
         <div class="split-grid">
@@ -586,6 +591,6 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="/app.js?v=22"></script>
+<script src="/app.js?v=24"></script>
 </body>
 </html>
