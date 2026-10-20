@@ -70,9 +70,9 @@ CONFIG_PATH = DATA_DIR / "workbench.json"
 DB_PATH = DATA_DIR / "kay-cftunnle.sqlite3"
 SESSION_COOKIE = "kay_cftunnle_session"
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.2.0"
 # 静态资源版本号：改前端后递增，用于破浏览器缓存（需与 index.html 的 ?v= 保持一致）
-STATIC_REV = 15
+STATIC_REV = 20
 START_TIME = time.time()
 SESSION_MAX_AGE = 7 * 24 * 60 * 60
 # 连接器运行超过该秒数视为「稳定运行」，看门狗重试计数归零
@@ -85,6 +85,30 @@ DEFAULT_USERNAME = "admin"
 DEFAULT_PASSWORD = "123456"
 # 历史出厂密码，仅用于升级时识别「用户从未改过密码」
 LEGACY_DEFAULT_PASSWORD = "admin123456"
+
+# cloudflared 支持的回源协议；面板按原文下发给 Cloudflare，不做端口推断
+SERVICE_SCHEMES = (
+    "http://", "https://", "tcp://", "tls://", "ssh://", "rdp://", "smb://",
+    "smtp://", "mysql://", "postgresql://", "clickhouse://", "kafka://",
+    "unix://", "unix:", "udp://",
+)
+
+
+def _service_ok(service: str) -> bool:
+    return str(service or "").startswith(SERVICE_SCHEMES)
+
+
+def _rule_hostname(subdomain: str, zone_name: str) -> str:
+    """规则子域名 → 隧道 Ingress 的 hostname。@ 为根域，* 为泛域名。"""
+    sub = str(subdomain or "").strip().lower()
+    zone = str(zone_name or "").strip().lower()
+    if not zone:
+        return ""
+    if sub in ("", "@"):
+        return zone
+    if sub == "*":
+        return "*." + zone
+    return sub + "." + zone
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "auth": {
@@ -110,7 +134,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "panel": {
         "title": "Kay-cftunnle 面板",
-        "no_auth_run": True,
+        # 仅本机开发用：免登录直接进面板。出厂必须是 False，否则 NAS 上任何人都能读到 Token
+        "no_auth_run": False,
     },
 }
 
@@ -1219,6 +1244,9 @@ class PanelHandler(BaseHTTPRequestHandler):
         if route == "/ingresses" and method == "POST":
             self._api_ingress_create()
             return
+        if route == "/ingresses/sync" and method == "POST":
+            self._api_ingress_sync()
+            return
         if len(parts) == 2 and parts[0] == "ingresses" and method == "DELETE":
             self._api_ingress_delete(parts[1])
             return
@@ -1486,6 +1514,10 @@ class PanelHandler(BaseHTTPRequestHandler):
             "/system/backup": "/system/backup" in src,
             "/system/info": "/system/info" in src,
             "ingress_update": "_api_ingress_update" in src,
+            # 路由下发到隧道远程配置是 1.1.0 的核心修复，NAS 上跑旧镜像时这里会是 false
+            "/ingresses/sync": "/ingresses/sync" in src,
+            "ingress_sync": "_api_ingress_sync" in src,
+            "tunnel_route_sync": "_sync_tunnel_ingress" in src,
             "watchdog": "_watchdog_loop" in src,
         }
         self._send_json({
@@ -1634,6 +1666,7 @@ class PanelHandler(BaseHTTPRequestHandler):
         # 附上 CNAME 目标（隧道 argo 域名）与缺失记录标记
         for ing in ingresses:
             ing["cname_target"] = (ing.get("tunnel_id") or "") + ".cfargotunnel.com"
+            ing["full_name"] = _rule_hostname(ing.get("subdomain"), ing.get("zone_name"))
         if ingresses:
             zone_ids = sorted({i["zone_id"] for i in ingresses if i.get("zone_id")})
             existing: Dict[str, set] = {}
@@ -1644,9 +1677,25 @@ class PanelHandler(BaseHTTPRequestHandler):
                 except CloudflareError:
                     existing[zid] = set()
             for ing in ingresses:
-                full = (ing["subdomain"] + "." + ing["zone_name"]).lower()
+                full = _rule_hostname(ing["subdomain"], ing["zone_name"]).lower()
                 names = existing.get(ing["zone_id"]) or set()
                 ing["dns_missing"] = bool(names) and full not in names
+            # 再对照隧道远程配置：DNS 有记录但隧道没这条 hostname 一样打不开
+            routes: Dict[str, list] = {}
+            for tid in sorted({i["tunnel_id"] for i in ingresses if i.get("tunnel_id")}):
+                try:
+                    routes[tid] = client.get_tunnel_ingress(tid)
+                except CloudflareError:
+                    continue  # 拉取失败时不下 route_missing 结论，避免误报
+            for ing in ingresses:
+                tid = ing.get("tunnel_id") or ""
+                if tid not in routes:
+                    continue
+                full = _rule_hostname(ing["subdomain"], ing["zone_name"]).lower()
+                matched = next((r for r in routes[tid]
+                                if str(r.get("hostname") or "").lower() == full), None)
+                ing["route_missing"] = matched is None
+                ing["remote_service"] = (matched or {}).get("service") or ""
         self._send_json({"ok": True, "configured": True, "ingresses": ingresses})
 
     def _upsert_dns_cname(self, client, zone_id: str, full_name: str, cname_target: str) -> str:
@@ -1694,6 +1743,58 @@ class PanelHandler(BaseHTTPRequestHandler):
             add_log("ingress", "DNS 记录并发冲突，已改为原地更新：" + full_name, "warn")
             return race.get("id") or ""
 
+    def _sync_tunnel_ingress(self, client, tunnel_id: str):
+        """把该隧道的全部本地规则整份下发到 Cloudflare 远程配置。
+
+        只建 DNS CNAME 是不够的：边缘按子域名找到隧道后，还要在隧道 config 的
+        ingress 里命中同一条 hostname 才会回源，否则请求直接 1033/502。
+        Cloudflare 要求最后一条是不带 hostname 的兜底规则。
+        """
+        if not tunnel_id:
+            return False, "缺少隧道 ID"
+        with db_connect() as conn:
+            rows = conn.execute(
+                "SELECT subdomain, zone_name, service FROM ingress_rules "
+                "WHERE tunnel_id=? ORDER BY id",
+                (tunnel_id,),
+            ).fetchall()
+        ingress = []
+        for r in rows:
+            hostname = _rule_hostname(r["subdomain"], r["zone_name"])
+            if hostname:
+                ingress.append({"hostname": hostname, "service": r["service"]})
+        ingress.append({"service": "http_status:404"})
+        try:
+            client.put_tunnel_ingress(tunnel_id, ingress)
+        except CloudflareError as exc:
+            add_log("ingress", "隧道路由下发失败：" + str(exc), "error")
+            return False, str(exc)
+        add_log("ingress", "已下发 %d 条路由到隧道 %s" % (len(ingress) - 1, tunnel_id[:8]))
+        return True, ""
+
+    def _api_ingress_sync(self) -> None:
+        """把本地规则重新整份下发到涉及的每条隧道。
+
+        用于修复历史遗留：早期版本只建了 DNS 记录、从没写过隧道配置，
+        规则在面板里看着齐了，实际一条都不通。
+        """
+        client = self._cf_client()
+        if client is None:
+            self._send_error_json(400, "尚未配置 Cloudflare 凭据")
+            return
+        with db_connect() as conn:
+            tids = [r["tunnel_id"] for r in conn.execute(
+                "SELECT DISTINCT tunnel_id FROM ingress_rules WHERE tunnel_id <> ''"
+            ).fetchall()]
+        if not tids:
+            self._send_json({"ok": True, "results": [], "message": "没有需要下发的规则"})
+            return
+        results = []
+        for tid in tids:
+            ok, error = self._sync_tunnel_ingress(client, tid)
+            results.append({"tunnel_id": tid, "ok": ok, "error": error})
+        self._send_json({"ok": all(r["ok"] for r in results), "results": results})
+
     def _api_ingress_create(self) -> None:
         body = self._read_body()
         subdomain = str(body.get("subdomain") or "").strip().lower()
@@ -1705,11 +1806,12 @@ class PanelHandler(BaseHTTPRequestHandler):
         if not subdomain or not zone_id or not tunnel_id or not service:
             self._send_error_json(400, "子域名、Zone、隧道、本地服务地址均不能为空")
             return
-        if not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?", subdomain):
-            self._send_error_json(400, "子域名只能包含小写字母、数字与连字符，1-63 位，且不能以连字符开头或结尾")
+        if subdomain not in ("@", "*") and not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?", subdomain):
+            self._send_error_json(400, "子域名只能包含小写字母、数字与连字符，1-63 位，且不能以连字符开头或结尾；"
+                                       "@ 表示根域名，* 表示泛域名")
             return
-        if not service.startswith(("http://", "https://", "unix:")):
-            self._send_error_json(400, "本地服务地址需以 http:// / https:// / unix: 开头")
+        if not _service_ok(service):
+            self._send_error_json(400, "本地服务地址协议不受支持（http/https/tcp/tls/ssh/rdp/unix 等）")
             return
         client = self._cf_client()
         if client is None:
@@ -1723,7 +1825,7 @@ class PanelHandler(BaseHTTPRequestHandler):
         if existing:
             self._send_error_json(400, "该子域名在当前 Zone 下已存在")
             return
-        full_name = subdomain + "." + zone_name
+        full_name = _rule_hostname(subdomain, zone_name)
         cname_target = tunnel_id + ".cfargotunnel.com"
         # 创建 Cloudflare DNS 记录（已存在同名记录时自动改为更新，不再报 81053）
         try:
@@ -1740,7 +1842,10 @@ class PanelHandler(BaseHTTPRequestHandler):
                 (subdomain, zone_id, zone_name, tunnel_id, tunnel_name, service, record_id, now, now),
             )
         add_log("ingress", "创建 %s → %s（隧道 %s）" % (full_name, service, tunnel_name or tunnel_id[:8]))
-        self._send_json({"ok": True, "ingress": {"subdomain": subdomain, "full_name": full_name, "record_id": record_id}})
+        synced, sync_error = self._sync_tunnel_ingress(client, tunnel_id)
+        self._send_json({"ok": True, "ingress": {"subdomain": subdomain, "full_name": full_name,
+                                                  "record_id": record_id},
+                         "synced": synced, "sync_error": sync_error})
 
     def _api_ingress_update(self, ingress_id: str) -> None:
         """就地更新 Ingress 规则：本地服务地址 / 隧道。
@@ -1754,8 +1859,8 @@ class PanelHandler(BaseHTTPRequestHandler):
         if not service:
             self._send_error_json(400, "本地服务地址不能为空")
             return
-        if not service.startswith(("http://", "https://", "unix:")):
-            self._send_error_json(400, "本地服务地址需以 http:// / https:// / unix: 开头")
+        if not _service_ok(service):
+            self._send_error_json(400, "本地服务地址协议不受支持（http/https/tcp/tls/ssh/rdp/unix 等）")
             return
         client = self._cf_client()
         if client is None:
@@ -1772,7 +1877,7 @@ class PanelHandler(BaseHTTPRequestHandler):
 
         new_tunnel_id = tunnel_id or row["tunnel_id"]
         new_tunnel_name = tunnel_name or row["tunnel_name"]
-        full_name = row["subdomain"] + "." + row["zone_name"]
+        full_name = _rule_hostname(row["subdomain"], row["zone_name"])
         cname_target = new_tunnel_id + ".cfargotunnel.com"
         new_record_id = row["cf_record_id"]
 
@@ -1806,10 +1911,14 @@ class PanelHandler(BaseHTTPRequestHandler):
                 (service, new_tunnel_id, new_tunnel_name, new_record_id, now, ingress_id),
             )
         add_log("ingress", "更新规则 %s → %s" % (full_name, service))
+        synced, sync_error = self._sync_tunnel_ingress(client, new_tunnel_id)
+        if row["tunnel_id"] and row["tunnel_id"] != new_tunnel_id:
+            # 换隧道后旧隧道里仍留着这条 hostname，需要把旧隧道的路由也重下一遍
+            self._sync_tunnel_ingress(client, row["tunnel_id"])
         self._send_json({"ok": True, "ingress": {
             "id": ingress_id, "full_name": full_name, "service": service,
             "tunnel_id": new_tunnel_id, "tunnel_name": new_tunnel_name,
-        }})
+        }, "synced": synced, "sync_error": sync_error})
 
     def _api_dns_records_list(self) -> None:
         """列出当前 Zone 的全部 DNS 记录，并标注哪些由本面板维护。"""
@@ -1846,7 +1955,8 @@ class PanelHandler(BaseHTTPRequestHandler):
             return
         with db_connect() as conn:
             row = conn.execute(
-                "SELECT zone_id, cf_record_id, subdomain, zone_name, service FROM ingress_rules WHERE id=?",
+                "SELECT zone_id, cf_record_id, subdomain, zone_name, service, tunnel_id "
+                "FROM ingress_rules WHERE id=?",
                 (ingress_id,),
             ).fetchone()
         if not row:
@@ -1864,7 +1974,8 @@ class PanelHandler(BaseHTTPRequestHandler):
         with db_connect() as conn:
             conn.execute("DELETE FROM ingress_rules WHERE id=?", (ingress_id,))
         add_log("ingress", "删除 %s.%s → %s" % (row["subdomain"], row["zone_name"], row["service"]))
-        self._send_json({"ok": True})
+        synced, sync_error = self._sync_tunnel_ingress(client, row["tunnel_id"])
+        self._send_json({"ok": True, "synced": synced, "sync_error": sync_error})
 
     # ---- 连接器（M4） ----
 
@@ -1990,11 +2101,8 @@ class PanelHandler(BaseHTTPRequestHandler):
 
 def self_check(cfg: Dict[str, Any]) -> Dict[str, Any]:
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-    cloudflared_ok = False
-    for candidate in ("cloudflared", "/usr/local/bin/cloudflared"):
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            cloudflared_ok = True
-            break
+    # 与连接器启动共用同一个查找逻辑，避免自检说「未安装」、启动却能正常拉起
+    cloudflared_ok = bool(CONNECTOR.find_binary())
     with db_connect() as conn:
         users = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
     return {

@@ -1,13 +1,23 @@
 /* SPDX-License-Identifier: MIT · Copyright (c) 2026 EasonShu */
 /* Kay-cftunnle 面板 · 前端逻辑
-   M1：登录 / 会话 / 路由 / 视图切换 / 主题
-   M2：设置页（Cloudflare 凭据 + 连通性验证 + 改密）、隧道页（列表/新建/删除/令牌）、
-       总览统计与最近操作日志。
+   顶部一级标签路由：overview / tunnels / dns(域名与规则) / connector / settings。
+   交互一律在页内完成：新建走 .form-panel，行内展开走 .row-detail（令牌、编辑、删除确认）。
    约定：/api 业务错误一律 HTTP 200 + {ok:false,...}，协议/鉴权错误才用 4xx/5xx。 */
 (function () {
   "use strict";
 
   var $ = function (id) { return document.getElementById(id); };
+
+  // 顶部一级标签：route → 标题，同时充当合法路由表
+  var TAB_TITLES = {
+    overview: "总览", tunnels: "隧道", dns: "域名与规则",
+    connector: "连接器", settings: "设置",
+  };
+
+  // 是否已进入面板：区分「从未登录」与「会话过期」，避免未登录时被登出逻辑刷循环
+  var panelEntered = false;
+  // 顶栏状态灯轮询句柄
+  var liveChipTimer = 0;
 
   // DNS / Ingress 缓存：refreshZones 拉取后供添加规则弹层使用
   var zonesCache = [];
@@ -53,28 +63,63 @@
     toastTimer = setTimeout(function () { el.classList.remove("show"); }, 2600);
   }
 
-  /* ------------------------------------------------------------ 弹层 */
+  // cloudflared 支持的回源协议，与后端 SERVICE_SCHEMES 保持一致
+  var SERVICE_RE = /^(https?|tls|tcp|ssh|rdp|smb|smtp|mysql|postgresql|clickhouse|kafka|udp):\/\/|^unix:/;
+  function serviceOk(s) { return SERVICE_RE.test(String(s || "").trim()); }
 
-  function openModal(title, bodyHtml, footerHtml) {
-    var root = $("modalRoot");
-    root.innerHTML =
-      '<div class="modal-card" role="dialog" aria-modal="true">' +
-        '<div class="modal-head">' +
-          '<span class="modal-title">' + esc(title) + '</span>' +
-          '<button class="modal-x" type="button" data-close title="关闭">✕</button>' +
-        '</div>' +
-        '<div class="modal-body">' + bodyHtml + '</div>' +
-        (footerHtml ? '<div class="modal-foot">' + footerHtml + '</div>' : '') +
-      '</div>';
-    root.hidden = false;
-    document.body.style.overflow = "hidden";
+  // 规则写进本地库之后还要下发到隧道；下发失败时流量是不通的，必须让用户看见
+  function notifySync(r, doneText) {
+    if (r && r.synced === false) {
+      toast(doneText + "，但隧道路由下发失败：" + (r.sync_error || "未知原因"));
+      return;
+    }
+    toast(doneText + "，隧道路由已生效");
   }
 
-  function closeModal() {
-    var root = $("modalRoot");
-    root.hidden = true;
-    root.innerHTML = "";
-    document.body.style.overflow = "";
+  /* ------------------------------------------------------------ 页内表单 / 行内展开 */
+
+  function openPanel(id, focusId) {
+    var el = $(id);
+    if (!el) return;
+    el.hidden = false;
+    var focus = focusId && $(focusId);
+    if (focus) focus.focus();
+  }
+
+  function closePanel(id) {
+    var el = $(id);
+    if (el) el.hidden = true;
+  }
+
+  // 一次只展开一处：行内表单有固定 id，必须先清掉其他行里开着的展开区
+  function toggleDetail(item, kind, html) {
+    var old = item.querySelector(".row-detail");
+    if (old && old.getAttribute("data-kind") === kind) {
+      collapseDetail(item);
+      return null;
+    }
+    collapseAll();
+    var box = document.createElement("div");
+    box.className = "row-detail";
+    box.setAttribute("data-kind", kind);
+    box.innerHTML = html;
+    item.appendChild(box);
+    item.classList.toggle("is-deleting", kind === "del");
+    return box;
+  }
+
+  function collapseDetail(item) {
+    var old = item.querySelector(".row-detail");
+    if (old) old.remove();
+    item.classList.remove("is-deleting");
+  }
+
+  function collapseAll() {
+    document.querySelectorAll(".row-detail").forEach(function (el) { el.remove(); });
+    document.querySelectorAll(".tunnel-item,.ingress-item").forEach(function (el) {
+      el.classList.remove("is-deleting");
+    });
+    ["tunnelForm", "ingressForm", "importConfirm"].forEach(closePanel);
   }
 
   function copyText(text) {
@@ -133,8 +178,10 @@
   }
 
   function logout() {
+    if (liveChipTimer) { clearInterval(liveChipTimer); liveChipTimer = 0; }
+    panelEntered = false;
     api("POST", "/auth/logout").catch(function () {}).then(function () {
-      closeModal();
+      collapseAll();
       $("shellView").hidden = true;
       $("loginView").style.display = "";
       location.hash = "";
@@ -143,28 +190,20 @@
 
   /* ------------------------------------------------------------ 面板框架 */
 
-  var ROUTE_TITLES = {
-    overview: "总览", tunnels: "隧道", dns: "DNS",
-    connector: "连接器", settings: "设置",
-  };
-
-  // 是否已进入面板：区分「从未登录」与「会话过期」，避免未登录时被登出逻辑刷循环
-  var panelEntered = false;
-
   function currentRoute() {
     var h = (location.hash || "").replace(/^#\/?/, "");
-    return ROUTE_TITLES[h] ? h : "overview";
+    return TAB_TITLES[h] ? h : "overview";
   }
 
   function applyRoute() {
     var route = currentRoute();
-    document.querySelectorAll(".side-link").forEach(function (a) {
+    collapseAll();
+    document.querySelectorAll(".tab-link").forEach(function (a) {
       a.classList.toggle("active", a.getAttribute("data-route") === route);
     });
     document.querySelectorAll(".view").forEach(function (v) {
       v.classList.toggle("active", v.id === "view-" + route);
     });
-    $("topbarTitle").textContent = ROUTE_TITLES[route];
     if (route === "overview") { refreshOverview(); loadSystemInfo(); }
     else if (route === "tunnels") refreshTunnels();
     else if (route === "dns") { refreshZones(); refreshIngresses(); refreshDnsRecords(); }
@@ -176,7 +215,31 @@
     panelEntered = true;
     $("loginView").style.display = "none";
     $("shellView").hidden = false;
+    refreshLiveChip();
+    if (!liveChipTimer) liveChipTimer = setInterval(refreshLiveChip, 20000);
     applyRoute();
+  }
+
+  // 顶栏常驻状态灯：不进连接器页也能看出流量是否通
+  function setLive(state, text) {
+    var dot = $("liveDot");
+    if (!dot) return;
+    dot.className = "dot is-" + state;
+    $("liveText").textContent = text;
+  }
+
+  function dotHtml(state) {
+    return '<span class="dot is-' + state + '"></span>';
+  }
+
+  // 状态灯独立刷新：落在哪个标签页都要亮，不能只在总览页拉一次
+  function refreshLiveChip() {
+    api("GET", "/connector/status").then(function (c) {
+      setLive(c.running ? "ok" : (c.binary_exists ? "idle" : "bad"),
+        c.running ? "隧道已连接" : (c.binary_exists ? "连接器未运行" : "cloudflared 未安装"));
+    }).catch(function () {
+      setLive("bad", "状态获取失败");
+    });
   }
 
   /* ------------------------------------------------------------ 总览 */
@@ -207,6 +270,7 @@
         $("statTunnels").textContent = "–";
         $("statRules").textContent = "–";
         $("statConnector").textContent = "未启动";
+        setLive("bad", "未配置凭据");
         renderLogs([]);
         return null;
       }
@@ -219,8 +283,14 @@
           $("statRules").textContent = r.configured ? String((r.ingresses || []).length) : "–";
         }).catch(function () { $("statRules").textContent = "!"; }),
         api("GET", "/connector/status").then(function (c) {
-          $("statConnector").textContent = c.running ? "运行中" : (c.binary_exists ? "已停止" : "未安装");
-        }).catch(function () { $("statConnector").textContent = "!"; }),
+          var label = c.running ? "运行中" : (c.binary_exists ? "已停止" : "未安装");
+          $("statConnector").textContent = label;
+          setLive(c.running ? "ok" : (c.binary_exists ? "idle" : "bad"),
+            c.running ? "隧道已连接" : (c.binary_exists ? "连接器未运行" : "cloudflared 未安装"));
+        }).catch(function () {
+          $("statConnector").textContent = "!";
+          setLive("bad", "状态获取失败");
+        }),
       ]);
     })
       .then(function () {
@@ -260,8 +330,9 @@
       var t = results[1] || {};
       if (c.error) {
         statusEl.textContent = "获取失败";
-        statusEl.className = "connector-value connector-bad";
+        statusEl.className = "connector-value is-bad";
         logsEl.textContent = c.error;
+        setLive("bad", "状态获取失败");
         return;
       }
       connectorTunnelsCache = (t.tunnels || []).filter(function (tu) { return tu.id && tu.name; });
@@ -273,13 +344,15 @@
 
       // 状态
       if (c.running) {
-        statusEl.textContent = "🟢 运行中";
-        statusEl.className = "connector-value connector-ok";
+        statusEl.textContent = "运行中";
+        statusEl.className = "connector-value is-ok";
       } else {
-        statusEl.textContent = c.binary_exists ? "⚪ 已停止" : "🔴 未安装";
-        statusEl.className = "connector-value " + (c.binary_exists ? "" : "connector-bad");
+        statusEl.textContent = c.binary_exists ? "已停止" : "未安装";
+        statusEl.className = "connector-value" + (c.binary_exists ? "" : " is-bad");
       }
-      binaryEl.textContent = c.binary_exists ? (c.binary_path ? esc(c.binary_path) : "已安装") : "未找到";
+      setLive(c.running ? "ok" : (c.binary_exists ? "idle" : "bad"),
+        c.running ? "隧道已连接" : (c.binary_exists ? "连接器未运行" : "cloudflared 未安装"));
+      binaryEl.textContent = c.binary_exists ? (c.binary_path || "已安装") : "未找到";
       var protoMap = { http2: "HTTP/2", quic: "QUIC" };
       var ipMap = { ipv4: "IPv4", ipv6: "IPv6" };
       protoEl.textContent = (protoMap[c.protocol] || (c.protocol || "").toUpperCase()) + " / " +
@@ -320,7 +393,7 @@
     var exit = w.exit || {};
     var rows = [];
     rows.push('<div class="wd-row"><span class="wd-k">看门狗</span><span class="wd-v">' +
-      (w.enabled ? "🟢 已启用" : "⚪ 已关闭") + '</span></div>');
+      (w.enabled ? "已启用" : "已关闭") + '</span></div>');
     if (w.retry_count) {
       rows.push('<div class="wd-row"><span class="wd-k">连续重试</span><span class="wd-v wd-warn">' +
         w.retry_count + " / " + (w.max_retry || 5) + ' 次</span></div>');
@@ -437,13 +510,13 @@
       var dataDir = s.data_dir || "–";
       var cfVersion = s.cloudflared_version || "未安装";
       var conn = s.connector || {};
-      var tunnelText = "–";
+      var tunnelText;
       if (conn.running && conn.current_tunnel_name) {
-        tunnelText = "🟢 " + conn.current_tunnel_name;
+        tunnelText = dotHtml("ok") + esc(conn.current_tunnel_name);
       } else if (conn.running && conn.current_tunnel_id) {
-        tunnelText = "🟢 " + conn.current_tunnel_id.slice(0, 8) + "…";
+        tunnelText = dotHtml("ok") + esc(conn.current_tunnel_id.slice(0, 8) + "…");
       } else {
-        tunnelText = "⚪ 未运行";
+        tunnelText = dotHtml("idle") + "未运行";
       }
       // 设置页
       $("sysPidSettings").textContent = (s.pid || "–") + " / Python " + (s.python_version || "–");
@@ -452,13 +525,13 @@
       $("sysUptime").textContent = uptime;
       $("sysDataDir").textContent = dataDir;
       $("sysCfVersion").textContent = cfVersion;
-      $("sysCurrentTunnel").textContent = tunnelText;
+      $("sysCurrentTunnel").innerHTML = tunnelText;
       // 设置页
       $("sysVersionSettings").textContent = version;
       $("sysUptimeSettings").textContent = uptime;
       $("sysDataDirSettings").textContent = dataDir;
       $("sysCfVersionSettings").textContent = cfVersion;
-      $("sysCurrentTunnelSettings").textContent = tunnelText;
+      $("sysCurrentTunnelSettings").innerHTML = tunnelText;
     }).catch(function () { /* 保持默认占位符 */ });
   }
 
@@ -492,7 +565,26 @@
         : "粘贴 API Token";
       $("cfTokenMasked").textContent = s.configured ? ("当前 Token：" + s.token_masked) : "";
     }).catch(function (err) { toast("保存失败：" + err.message); })
-      .finally(function () { btn.disabled = false; btn.textContent = "保存"; });
+      .finally(function () { btn.disabled = false; btn.textContent = "保存配置"; });
+  }
+
+  // 改密会吊销全部会话，成功后必须回到登录屏
+  function savePassword() {
+    var btn = $("savePwBtn");
+    var oldPass = $("pwOld").value;
+    var newPass = $("pwNew").value;
+    if (!oldPass || !newPass) { toast("当前密码和新密码都不能为空"); return; }
+    if (newPass.length < 8) { toast("新密码至少 8 位"); return; }
+    if (newPass !== $("pwNew2").value) { toast("两次输入的新密码不一致"); return; }
+    btn.disabled = true;
+    btn.textContent = "修改中…";
+    api("POST", "/auth/password", { old_password: oldPass, new_password: newPass }).then(function () {
+      $("pwOld").value = ""; $("pwNew").value = ""; $("pwNew2").value = "";
+      toast("密码已修改，请用新密码重新登录");
+      // 服务端已吊销全部会话，直接走登出流程
+      logout();
+    }).catch(function (err) { toast("修改失败：" + err.message); })
+      .finally(function () { btn.disabled = false; btn.textContent = "修改密码"; });
   }
 
   function reportRow(type, text) {
@@ -570,6 +662,10 @@
     }).finally(function () { btn.disabled = false; btn.textContent = "导出配置"; });
   }
 
+  function sysRow(k, v) {
+    return '<div class="sys-row"><span class="sys-k">' + esc(k) + '</span><span class="sys-v">' + esc(v) + '</span></div>';
+  }
+
   function importConfigFile(file) {
     if (!file) return;
     var reader = new FileReader();
@@ -581,21 +677,20 @@
         toast("文件不是合法的 JSON");
         return;
       }
-      openModal("导入配置",
-        '<p style="margin:0 0 var(--space-2)">将用该配置覆盖当前的 <b>Cloudflare 凭据</b> 与 <b>连接器设置</b>。</p>' +
-        '<p style="margin:0;color:var(--theme-muted);font-size:var(--text-sm);line-height:var(--leading-relaxed)">' +
-          '账号：' + esc((parsed.cloudflare && parsed.cloudflare.account_id) || "未填写") + '<br>' +
-          'Token：' + ((parsed.cloudflare && parsed.cloudflare.api_token) ? "已包含" : "未包含") + '<br>' +
-          '默认隧道：' + esc((parsed.connector && parsed.connector.default_tunnel_id) || "未设置") +
-        '</p>',
-        '<button class="btn btn-ghost btn-auto" type="button" data-close>取消</button>' +
-        '<button class="btn btn-primary btn-auto" type="button" id="mImportOk">确认导入</button>');
-      $("mImportOk").addEventListener("click", function () {
+      var cf = parsed.cloudflare || {};
+      var conn = parsed.connector || {};
+      $("importSummary").innerHTML =
+        sysRow("文件", file.name || "–") +
+        sysRow("Account ID", cf.account_id || "未填写") +
+        sysRow("API Token", cf.api_token ? "已包含，导入后立即生效" : "未包含") +
+        sysRow("默认隧道", conn.default_tunnel_id || "未设置");
+      openPanel("importConfirm");
+      $("mImportOk").onclick = function () {
         var ok = this;
         ok.disabled = true;
         ok.textContent = "导入中…";
         api("POST", "/system/backup", { backup: parsed }).then(function () {
-          closeModal();
+          closePanel("importConfirm");
           toast("配置已导入");
           $("backupHint").textContent = "导入完成，配置已生效";
           loadCfStatus();
@@ -605,22 +700,22 @@
           ok.disabled = false;
           ok.textContent = "确认导入";
         });
-      });
+      };
     };
     reader.readAsText(file, "utf-8");
   }
 
   /* ------------------------------------------------------------ 隧道页 */
 
-  function setTunnelsEmpty(ico, title, sub, withSettingsLink) {
-    var el = $("tunnelsEmpty");
+  function setEmptyState(id, title, sub, withSettingsLink) {
+    var el = $(id);
     el.hidden = false;
     el.innerHTML =
-      '<div class="empty-ico">' + ico + '</div>' +
+      '<div class="empty-ring" aria-hidden="true"></div>' +
       '<div class="empty-t">' + esc(title) + '</div>' +
       '<div class="empty-s">' + esc(sub) + '</div>' +
       (withSettingsLink
-        ? '<a class="btn btn-primary btn-auto" href="#/settings" style="margin-top:var(--space-4)">去设置</a>'
+        ? '<a class="btn btn-primary btn-auto" href="#/settings" style="margin-top:var(--space-4)">去设置页配置</a>'
         : "");
   }
 
@@ -632,21 +727,21 @@
     api("GET", "/tunnels").then(function (t) {
       list.innerHTML = "";
       if (!t.configured) {
-        setTunnelsEmpty("⚙️", "尚未配置 Cloudflare 凭据",
-          "请先到「设置」页填写 API Token 并验证连通性", true);
+        setEmptyState("tunnelsEmpty", "尚未配置 Cloudflare 凭据",
+          "请先到设置页填写 API Token 并测试配置", true);
         return;
       }
       if (!t.ok) {
         notice.hidden = false;
-        notice.innerHTML = '<span>⚠️</span><span>获取隧道列表失败：' + esc(t.error || "未知错误") +
-          '。若刚修改凭据，请先到设置页做一次「验证连通性」。</span>';
+        notice.innerHTML = '<span class="notice-ico">!</span><span>获取隧道列表失败：' + esc(t.error || "未知错误") +
+          '。若刚修改凭据，请先到设置页做一次「测试配置」。</span>';
         return;
       }
       renderTunnels(t.tunnels || []);
     }).catch(function (err) {
       list.innerHTML = "";
       notice.hidden = false;
-      notice.innerHTML = '<span>⚠️</span><span>' + esc(err.message || "加载失败") + '</span>';
+      notice.innerHTML = '<span class="notice-ico">!</span><span>' + esc(err.message || "加载失败") + '</span>';
     });
   }
 
@@ -654,7 +749,8 @@
     var list = $("tunnelsList");
     if (!tunnels.length) {
       list.innerHTML = "";
-      setTunnelsEmpty("🚇", "还没有隧道", "点击右上角「新建隧道」创建第一条", false);
+      setEmptyState("tunnelsEmpty", "还没有隧道",
+        "点击上方「新建隧道」，在 Cloudflare 账号里创建第一条命名隧道。", false);
       return;
     }
     $("tunnelsEmpty").hidden = true;
@@ -662,34 +758,25 @@
       var cloudActive = t.status === "active";
       var localRunning = !!t.local_running;
       var date = (t.created_at || "").slice(0, 10) || "—";
-      var statusLabel, statusCls, statusMeta;
-      if (cloudActive && localRunning) {
-        statusLabel = "已连接";
-        statusCls = "badge-ok";
-        statusMeta = "云端活跃 · 本地运行中";
-      } else if (cloudActive) {
-        statusLabel = "云端活跃";
-        statusCls = "badge-warn";
-        statusMeta = "云端活跃 · 本地未运行";
-      } else {
-        statusLabel = "未连接";
-        statusCls = "badge-muted";
-        statusMeta = "云端未连接";
-      }
-      return '<div class="tunnel-item" data-id="' + esc(t.id) + '" data-name="' + esc(t.name) + '">' +
+      var statusLabel, statusCls;
+      if (cloudActive && localRunning) { statusLabel = "已连接"; statusCls = "badge-ok"; }
+      else if (cloudActive) { statusLabel = "本地未运行"; statusCls = "badge-warn"; }
+      else { statusLabel = "未连接"; statusCls = "badge-muted"; }
+      return '<div class="tunnel-item' + (localRunning ? " is-connected" : "") +
+          '" data-id="' + esc(t.id) + '" data-name="' + esc(t.name) + '">' +
         '<div class="tunnel-main">' +
-          '<div class="tunnel-name">🚇 ' + esc(t.name) +
-            ' <span class="badge ' + statusCls + '">' + statusLabel + '</span>' +
+          '<div class="tunnel-name">' + esc(t.name) +
+            ' <span class="badge ' + statusCls + '">' + statusLabel + '</span></div>' +
+          '<div class="tunnel-meta"><code class="kv">' + esc(t.id) + '</code>' +
+            '<span>创建于 ' + esc(date) + '</span>' +
+            (cloudActive && t.connections ? '<span>活跃连接 ' + esc(t.connections) + '</span>' : '') +
           '</div>' +
-          '<div class="tunnel-meta"><code class="kv">' + esc(t.id) + '</code> · 创建于 ' + esc(date) +
-            ' · ' + statusMeta +
-            (cloudActive && t.connections ? " · 活跃连接 " + esc(t.connections) : "") + '</div>' +
         '</div>' +
         '<div class="tunnel-actions">' +
           (localRunning
             ? '<button class="btn btn-danger-ghost btn-sm" type="button" data-act="disconnect">断开</button>'
             : '<button class="btn btn-primary btn-sm" type="button" data-act="connect">连接</button>') +
-          '<button class="btn btn-ghost btn-sm" type="button" data-act="token">获取令牌</button>' +
+          '<button class="btn btn-ghost btn-sm" type="button" data-act="token">令牌</button>' +
           '<button class="btn btn-danger-ghost btn-sm" type="button" data-act="del">删除</button>' +
         '</div>' +
       '</div>';
@@ -724,6 +811,50 @@
     });
   }
 
+  // 令牌与删除确认都在行内展开，不再另开窗口
+  function openTokenDetail(item, id) {
+    var box = toggleDetail(item, "token",
+      '<div class="row-detail-note">这是 cloudflared 连接该隧道的凭据，相当于密码。其他机器上用 ' +
+        '<code class="kv">cloudflared tunnel run --token &lt;令牌&gt;</code> 即可接入，请勿提交到公开仓库。</div>' +
+      '<div class="token-box">读取中…</div>' +
+      '<div class="btn-row" style="margin-top:var(--space-4)">' +
+        '<button class="btn btn-primary btn-sm btn-auto" type="button" data-act="copy-token">复制令牌</button>' +
+        '<button class="btn btn-ghost btn-sm btn-auto" type="button" data-act="detail-close">收起</button>' +
+      '</div>');
+    if (!box) return;
+    api("GET", "/tunnels/" + encodeURIComponent(id) + "/token").then(function (res) {
+      var token = res.token || "";
+      item.setAttribute("data-token", token);
+      box.querySelector(".token-box").textContent = token || "（云端没有返回令牌）";
+    }).catch(function (err) {
+      box.querySelector(".token-box").textContent = "读取失败：" + err.message;
+    });
+  }
+
+  function openDeleteDetail(item, id, name) {
+    var box = toggleDetail(item, "del",
+      '<p class="row-detail-note">确定删除隧道 <b>' + esc(name) + '</b> 吗？此操作不可恢复；' +
+        '若该隧道仍有活跃连接（cloudflared 正在运行），Cloudflare 会拒绝删除，请先停止连接器。</p>' +
+      '<div class="btn-row">' +
+        '<button class="btn btn-danger btn-sm btn-auto" type="button" data-act="del-yes">确认删除</button>' +
+        '<button class="btn btn-ghost btn-sm btn-auto" type="button" data-act="detail-close">取消</button>' +
+      '</div>');
+    if (!box) return;
+    box.querySelector('[data-act="del-yes"]').onclick = function () {
+      var ok = this;
+      ok.disabled = true;
+      ok.textContent = "删除中…";
+      api("DELETE", "/tunnels/" + encodeURIComponent(id)).then(function () {
+        toast("隧道「" + name + "」已删除");
+        refreshTunnels();
+      }).catch(function (err) {
+        toast("删除失败：" + err.message);
+        ok.disabled = false;
+        ok.textContent = "确认删除";
+      });
+    };
+  }
+
   function onTunnelsClick(ev) {
     var btn = ev.target.closest("[data-act]");
     if (!btn) return;
@@ -732,10 +863,12 @@
     var id = item.getAttribute("data-id");
     var name = item.getAttribute("data-name");
     var act = btn.getAttribute("data-act");
-    if (act === "token") showTunnelToken(id);
+    if (act === "token") openTokenDetail(item, id);
+    else if (act === "del") openDeleteDetail(item, id, name);
+    else if (act === "detail-close") collapseDetail(item);
+    else if (act === "copy-token") copyText(item.getAttribute("data-token") || "");
     else if (act === "connect") connectTunnel(id, name, btn);
     else if (act === "disconnect") disconnectTunnel(btn);
-    else deleteTunnel(id, name);
   }
 
   function newTunnel() {
@@ -745,18 +878,10 @@
         location.hash = "#/settings";
         return;
       }
-      openModal("新建隧道",
-        '<div class="field">' +
-          '<label class="field-label" for="mTunnelName">隧道名称</label>' +
-          '<input class="field-input" id="mTunnelName" type="text" maxlength="63" ' +
-            'placeholder="例如 my-nas" autocomplete="off">' +
-          '<div class="form-hint">小写字母、数字与连字符，1-63 位；名称在账号内唯一。</div>' +
-        '</div>',
-        '<button class="btn btn-ghost btn-auto" type="button" data-close>取消</button>' +
-        '<button class="btn btn-primary btn-auto" type="button" id="mTunnelOk">创建</button>');
-      $("mTunnelName").focus();
-      $("mTunnelOk").addEventListener("click", function () {
-        var name = $("mTunnelName").value.trim();
+      $("mTunnelName").value = "";
+      openPanel("tunnelForm", "mTunnelName");
+      $("mTunnelOk").onclick = function () {
+        var name = $("mTunnelName").value.trim().toLowerCase();
         if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(name)) {
           toast("名称需为小写字母 / 数字 / 连字符，1-63 位");
           return;
@@ -765,75 +890,25 @@
         ok.disabled = true;
         ok.textContent = "创建中…";
         api("POST", "/tunnels", { name: name }).then(function () {
-          closeModal();
+          closePanel("tunnelForm");
           toast("隧道「" + name + "」已创建");
           refreshTunnels();
         }).catch(function (err) {
           toast("创建失败：" + err.message);
           ok.disabled = false;
-          ok.textContent = "创建";
+          ok.textContent = "创建隧道";
         });
-      });
+      };
     }).catch(function () { toast("状态获取失败"); });
   }
 
-  function deleteTunnel(id, name) {
-    openModal("删除隧道",
-      '<p style="margin:0 0 var(--space-2)">确定删除隧道 <b>' + esc(name) + '</b> 吗？</p>' +
-      '<p style="margin:0;color:var(--theme-muted);font-size:var(--text-sm);line-height:var(--leading-relaxed)">' +
-        '此操作不可恢复。若该隧道仍有活跃连接（cloudflared 正在运行），Cloudflare 会拒绝删除，请先停止连接器。' +
-      '</p>',
-      '<button class="btn btn-ghost btn-auto" type="button" data-close>取消</button>' +
-      '<button class="btn btn-danger btn-auto" type="button" id="mDelOk">删除</button>');
-    $("mDelOk").addEventListener("click", function () {
-      var ok = this;
-      ok.disabled = true;
-      ok.textContent = "删除中…";
-      api("DELETE", "/tunnels/" + encodeURIComponent(id)).then(function () {
-        closeModal();
-        toast("已删除");
-        refreshTunnels();
-      }).catch(function (err) {
-        toast("删除失败：" + err.message);
-        ok.disabled = false;
-        ok.textContent = "删除";
-      });
-    });
-  }
-
-  function showTunnelToken(id) {
-    api("GET", "/tunnels/" + encodeURIComponent(id) + "/token").then(function (res) {
-      var token = res.token || "";
-      openModal("隧道连接令牌",
-        '<p style="margin:0 0 var(--space-3);font-size:var(--text-sm);color:var(--theme-muted);line-height:var(--leading-relaxed)">' +
-          '此令牌是 cloudflared 连接该隧道的凭据（相当于密码），请妥善保存，不要提交到公开仓库。' +
-        '</p>' +
-        '<div class="token-box">' + esc(token) + '</div>',
-        '<button class="btn btn-ghost btn-auto" type="button" data-close>关闭</button>' +
-        '<button class="btn btn-primary btn-auto" type="button" id="mCopyTok">复制</button>');
-      $("mCopyTok").addEventListener("click", function () { copyText(token); });
-    }).catch(function (err) { toast("获取令牌失败：" + err.message); });
-  }
-
   /* ------------------------------------------------------------ DNS 页 */
-
-  function setZonesEmpty(ico, title, sub, withSettingsLink) {
-    var el = $("zonesEmpty");
-    el.hidden = false;
-    el.innerHTML =
-      '<div class="empty-ico">' + ico + '</div>' +
-      '<div class="empty-t">' + esc(title) + '</div>' +
-      '<div class="empty-s">' + esc(sub) + '</div>' +
-      (withSettingsLink
-        ? '<a class="btn btn-primary btn-auto" href="#/settings" style="margin-top:var(--space-4)">去设置</a>'
-        : "");
-  }
 
   function renderZones(zones, primaryZone) {
     var list = $("zonesList");
     if (!zones.length) {
       list.innerHTML = "";
-      setZonesEmpty("🌐", "未找到域名", "当前 Token 可见账号下没有 Zone", false);
+      setEmptyState("zonesEmpty", "未找到域名", "当前 Token 可见的账号下没有 Zone。", false);
       return;
     }
     $("zonesEmpty").hidden = true;
@@ -841,9 +916,12 @@
       var isPrimary = z.id === primaryZone;
       return '<div class="zone-item' + (isPrimary ? " zone-primary" : "") + '" data-id="' + esc(z.id) + '" data-name="' + esc(z.name) + '">' +
         '<div class="zone-main">' +
-          '<div class="zone-name">' + esc(z.name) + (isPrimary ? ' <span class="zone-badge">当前</span>' : "") + '</div>' +
-          '<div class="zone-meta">' + (z.status === "active" ? "🟢 已激活" : "⚪ " + esc(z.status || "未激活")) +
-            ' · ' + (z.type === "partial" ? "部分 Zone" : "完整 Zone") + '</div>' +
+          '<div class="zone-name">' + esc(z.name) + (isPrimary ? ' <span class="zone-badge">当前 Zone</span>' : "") + '</div>' +
+          '<div class="zone-meta">' +
+            '<span class="badge ' + (z.status === "active" ? "badge-ok" : "badge-muted") + '">' +
+              (z.status === "active" ? "已激活" : esc(z.status || "未激活")) + '</span>' +
+            '<span>' + (z.type === "partial" ? "部分 Zone" : "完整 Zone") + '</span>' +
+          '</div>' +
         '</div>' +
         '<button class="btn btn-ghost btn-sm zone-set-btn" type="button" ' + (isPrimary ? 'disabled' : "") + '>' +
           (isPrimary ? "已选择" : "设为当前") + '</button>' +
@@ -859,13 +937,13 @@
     api("GET", "/cloudflare/zones").then(function (z) {
       list.innerHTML = "";
       if (!z.configured) {
-        setZonesEmpty("⚙️", "尚未配置 Cloudflare 凭据",
-          "请先到「设置」页填写 API Token 并保存", true);
+        setEmptyState("zonesEmpty", "尚未配置 Cloudflare 凭据",
+          "请先到设置页填写 API Token 并保存", true);
         return;
       }
       if (!z.ok) {
         notice.hidden = false;
-        notice.innerHTML = '<span>⚠️</span><span>获取域名列表失败：' + esc(z.error || "未知错误") +
+        notice.innerHTML = '<span class="notice-ico">!</span><span>获取域名列表失败：' + esc(z.error || "未知错误") +
           '。请检查 Token 是否包含「区域 → 区域 读取」权限。</span>';
         $("zonesEmpty").hidden = false;
         return;
@@ -876,7 +954,7 @@
     }).catch(function (err) {
       list.innerHTML = "";
       notice.hidden = false;
-      notice.innerHTML = '<span>⚠️</span><span>' + esc(err.message || "加载失败") + '</span>';
+      notice.innerHTML = '<span class="notice-ico">!</span><span>' + esc(err.message || "加载失败") + '</span>';
     });
   }
 
@@ -902,34 +980,32 @@
 
   /* ------------------------------------------------------------ Ingress 规则 */
 
-  function setIngressesEmpty(ico, title, sub) {
-    var el = $("ingressEmpty");
-    el.hidden = false;
-    el.innerHTML =
-      '<div class="empty-ico">' + ico + '</div>' +
-      '<div class="empty-t">' + esc(title) + '</div>' +
-      '<div class="empty-s">' + esc(sub) + '</div>';
-  }
-
   function renderIngresses(ingresses) {
     var list = $("ingressList");
     if (!ingresses.length) {
       list.innerHTML = "";
-      setIngressesEmpty("🚧", "还没有 Ingress 规则",
-        "点击右上角「添加规则」把子域名映射到 NAS 本地服务");
+      setEmptyState("ingressEmpty", "还没有 Ingress 规则",
+        "点击上方「添加规则」，把子域名映射到 NAS 本地服务。", false);
       return;
     }
     $("ingressEmpty").hidden = true;
     list.innerHTML = ingresses.map(function (r) {
+      var flags = "";
+      if (r.dns_missing) flags += ' <span class="badge badge-warn">DNS 已缺失</span>';
+      if (r.route_missing) flags += ' <span class="badge badge-warn">路由未下发</span>';
+      if (!r.dns_missing && !r.route_missing) flags += ' <span class="badge badge-ok">已生效</span>';
       return '<div class="ingress-item" data-id="' + esc(r.id) + '" data-sub="' + esc(r.subdomain) +
-          '" data-zone="' + esc(r.zone_name) + '" data-tunnel="' + esc(r.tunnel_id) +
-          '" data-tunnelname="' + esc(r.tunnel_name) + '" data-service="' + esc(r.service) + '">' +
+          '" data-zone="' + esc(r.zone_name) + '" data-full="' + esc(r.full_name || (r.subdomain + "." + r.zone_name)) +
+          '" data-tunnel="' + esc(r.tunnel_id) + '" data-tunnelname="' + esc(r.tunnel_name) +
+          '" data-service="' + esc(r.service) + '">' +
         '<div class="ingress-main">' +
-          '<div class="ingress-name">🌐 ' + esc(r.subdomain) + '.' + esc(r.zone_name) +
-            ' <span class="ingress-arrow">→</span> ' + esc(r.service) +
-            (r.dns_missing ? ' <span class="badge badge-warn">DNS 已缺失</span>' : '') + '</div>' +
-          '<div class="ingress-meta">CNAME ' + esc(r.cname_target) +
-            (r.tunnel_name ? ' · 隧道 ' + esc(r.tunnel_name) : '') + '</div>' +
+          '<div class="ingress-name"><code class="kv">' + esc(r.full_name || (r.subdomain + "." + r.zone_name)) +
+            '</code> <span class="ingress-arrow">→</span> ' + esc(r.service) + flags + '</div>' +
+          '<div class="ingress-meta">' +
+            '<span>CNAME → ' + esc(r.cname_target) + '</span>' +
+            (r.tunnel_name ? '<span>隧道 ' + esc(r.tunnel_name) + '</span>' : '') +
+            (!r.route_missing && r.remote_service ? '<span>云端生效中 → ' + esc(r.remote_service) + '</span>' : '') +
+          '</div>' +
         '</div>' +
         '<div class="ingress-actions">' +
           '<button class="btn btn-ghost btn-sm" type="button" data-act="edit">编辑</button>' +
@@ -947,127 +1023,130 @@
     api("GET", "/ingresses").then(function (r) {
       list.innerHTML = "";
       if (!r.configured) {
-        setIngressesEmpty("⚙️", "尚未配置 Cloudflare 凭据",
-          "请先到「设置」页填写 API Token 并保存");
+        setEmptyState("ingressEmpty", "尚未配置 Cloudflare 凭据",
+          "请先到设置页填写 API Token 并保存", true);
         return;
       }
       renderIngresses(r.ingresses || []);
     }).catch(function (err) {
       list.innerHTML = "";
       notice.hidden = false;
-      notice.innerHTML = '<span>⚠️</span><span>' + esc(err.message || "加载失败") + '</span>';
+      notice.innerHTML = '<span class="notice-ico">!</span><span>' + esc(err.message || "加载失败") + '</span>';
     });
   }
 
+  function syncIngresses() {
+    var btn = $("syncIngressBtn");
+    btn.disabled = true;
+    btn.textContent = "下发中…";
+    api("POST", "/ingresses/sync", {}).then(function (r) {
+      var bad = (r.results || []).filter(function (x) { return !x.ok; });
+      if (!r.results || !r.results.length) {
+        toast(r.message || "没有需要下发的规则");
+      } else if (bad.length) {
+        toast("有 " + bad.length + " 条隧道路由下发失败：" + bad[0].error);
+      } else {
+        toast("已把 " + r.results.length + " 条隧道的路由下发完成");
+      }
+      refreshIngresses();
+    }).catch(function (err) {
+      toast("下发失败：" + err.message);
+    }).then(function () {
+      btn.disabled = false;
+      btn.textContent = "↻ 重新下发路由";
+    });
+  }
+
+  function ingressZoneOptions() {
+    return zonesCache.map(function (z) {
+      return '<option value="' + esc(z.id) + '" data-name="' + esc(z.name) + '"' +
+        (z.id === currentPrimaryZone ? ' selected' : '') + '>' + esc(z.name) + '</option>';
+    }).join("");
+  }
+
+  function ingressTunnelOptions(tunnels, selectedId) {
+    return tunnels.map(function (tu) {
+      return '<option value="' + esc(tu.id) + '"' + (tu.id === selectedId ? ' selected' : '') + '>' +
+        esc(tu.name) + '</option>';
+    }).join("");
+  }
+
+  // 快速操作可能直接跳到「添加规则」，此时 Zone 还没拉过，先补一次
+  function ensureZones() {
+    if (zonesCache.length) return Promise.resolve(true);
+    return api("GET", "/cloudflare/zones").then(function (z) {
+      if (z.configured && z.ok) {
+        zonesCache = z.zones || [];
+        currentPrimaryZone = z.primary_zone || "";
+        renderZones(zonesCache, currentPrimaryZone);
+      }
+      return zonesCache.length > 0;
+    }).catch(function () { return false; });
+  }
+
   function newIngress() {
-    if (!zonesCache.length) {
-      toast("请先获取域名列表");
-      refreshZones();
-      return;
-    }
-    api("GET", "/tunnels").then(function (t) {
-      if (!t.configured || !t.ok || !(t.tunnels || []).length) {
-        toast("请先创建至少一条 Cloudflare 隧道");
-        location.hash = "#/tunnels";
+    ensureZones().then(function (hasZone) {
+      if (!hasZone) {
+        toast("当前账号下没有可用域名，请先到设置页确认 Token 权限");
         return;
       }
-      var tunnels = t.tunnels;
-      var zoneOptions = zonesCache.map(function (z) {
-        return '<option value="' + esc(z.id) + '" data-name="' + esc(z.name) + '"' +
-          (z.id === currentPrimaryZone ? ' selected' : '') + '>' + esc(z.name) + '</option>';
-      }).join("");
-      var tunnelOptions = tunnels.map(function (tu) {
-        return '<option value="' + esc(tu.id) + '">' + esc(tu.name) + '</option>';
-      }).join("");
-      openModal("添加 Ingress 规则",
-        '<div class="field">' +
-          '<label class="field-label" for="mIngSubdomain">子域名前缀</label>' +
-          '<input class="field-input" id="mIngSubdomain" type="text" placeholder="例如 nas" autocomplete="off">' +
-          '<div class="form-hint">小写字母 / 数字 / 连字符，1-63 位。</div>' +
-        '</div>' +
-        '<div class="field">' +
-          '<label class="field-label" for="mIngZone">目标 Zone</label>' +
-          '<select class="field-input" id="mIngZone">' + zoneOptions + '</select>' +
-        '</div>' +
-        '<div class="field">' +
-          '<label class="field-label" for="mIngTunnel">目标隧道</label>' +
-          '<select class="field-input" id="mIngTunnel">' + tunnelOptions + '</select>' +
-        '</div>' +
-        '<div class="field">' +
-          '<label class="field-label" for="mIngService">本地服务地址</label>' +
-          '<input class="field-input" id="mIngService" type="text" ' +
-            'placeholder="例如 http://127.0.0.1:8080 或 unix:/var/run/app.sock" autocomplete="off">' +
-          '<div class="form-hint">保存后会自动把「子域名.Zone」CNAME 指向所选隧道。</div>' +
-        '</div>',
-        '<button class="btn btn-ghost btn-auto" type="button" data-close>取消</button>' +
-        '<button class="btn btn-primary btn-auto" type="button" id="mIngOk">创建</button>');
-      $("mIngSubdomain").focus();
-      $("mIngOk").addEventListener("click", function () {
-        var subdomain = $("mIngSubdomain").value.trim().toLowerCase();
+      return api("GET", "/tunnels").then(function (t) {
+        if (!t.configured || !t.ok || !(t.tunnels || []).length) {
+          toast("请先创建至少一条 Cloudflare 隧道");
+          location.hash = "#/tunnels";
+          return;
+        }
+        $("mIngZone").innerHTML = ingressZoneOptions();
+        $("mIngTunnel").innerHTML = ingressTunnelOptions(t.tunnels, "");
+        $("mIngSubdomain").value = "";
+        $("mIngService").value = "";
+        openPanel("ingressForm", "mIngSubdomain");
+        $("mIngOk").onclick = function () {
         var zoneSel = $("mIngZone");
-        var zoneId = zoneSel.value;
-        var zoneName = zoneSel.options[zoneSel.selectedIndex].getAttribute("data-name") || zoneSel.value;
         var tunnelSel = $("mIngTunnel");
-        var tunnelId = tunnelSel.value;
-        var tunnelName = tunnelSel.options[tunnelSel.selectedIndex].textContent;
+        var subdomain = $("mIngSubdomain").value.trim().toLowerCase();
         var service = $("mIngService").value.trim();
-        if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(subdomain)) {
+        if (subdomain !== "@" && subdomain !== "*" && !/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(subdomain)) {
           toast("子域名格式不正确");
           return;
         }
-        if (!service.startsWith("http://") && !service.startsWith("https://") && !service.startsWith("unix:")) {
-          toast("本地服务地址需以 http:// / https:// / unix: 开头");
+        if (!serviceOk(service)) {
+          toast("本地服务地址协议不受支持（http/https/tcp/tls/ssh/rdp/unix 等）");
           return;
         }
         var ok = this;
         ok.disabled = true;
         ok.textContent = "创建中…";
         api("POST", "/ingresses", {
-          subdomain: subdomain, zone_id: zoneId, zone_name: zoneName,
-          tunnel_id: tunnelId, tunnel_name: tunnelName, service: service,
-        }).then(function () {
-          closeModal();
-          toast("规则已创建，CNAME 同步完成");
+          subdomain: subdomain,
+          zone_id: zoneSel.value,
+          zone_name: zoneSel.options[zoneSel.selectedIndex].getAttribute("data-name") || zoneSel.value,
+          tunnel_id: tunnelSel.value,
+          tunnel_name: tunnelSel.options[tunnelSel.selectedIndex].textContent,
+          service: service,
+        }).then(function (r) {
+          closePanel("ingressForm");
+          notifySync(r, "规则已创建");
           refreshIngresses();
           refreshDnsRecords();
         }).catch(function (err) {
           toast("创建失败：" + err.message);
           ok.disabled = false;
-          ok.textContent = "创建";
+          ok.textContent = "创建规则";
         });
-      });
-    }).catch(function (err) { toast("获取隧道列表失败：" + err.message); });
-  }
-
-  function onIngressClick(ev) {
-    var btn = ev.target.closest("[data-act]");
-    if (!btn) return;
-    var item = btn.closest(".ingress-item");
-    if (!item) return;
-    var id = item.getAttribute("data-id");
-    var fullName = (item.querySelector(".ingress-name").textContent || "").replace(/^🌐\s*/, "").split(" → ")[0];
-    var act = btn.getAttribute("data-act");
-    if (act === "del") {
-      deleteIngress(id, fullName);
-    } else if (act === "edit") {
-      editIngress(item);
-    }
+        };
+      }).catch(function (err) { toast("获取隧道列表失败：" + err.message); });
+    });
   }
 
   function editIngress(item) {
     var id = item.getAttribute("data-id");
-    var fullName = item.getAttribute("data-sub") + "." + item.getAttribute("data-zone");
+    var fullName = item.getAttribute("data-full");
     var currentTunnel = item.getAttribute("data-tunnel");
     var currentService = item.getAttribute("data-service");
 
-    api("GET", "/tunnels").then(function (t) {
-      var tunnels = (t.tunnels || []);
-      var tunnelOptions = tunnels.map(function (tu) {
-        return '<option value="' + esc(tu.id) + '"' + (tu.id === currentTunnel ? ' selected' : '') +
-          '>' + esc(tu.name) + '</option>';
-      }).join("");
-
-      openModal("编辑 Ingress 规则",
+    var box = toggleDetail(item, "edit",
+      '<div class="form-grid">' +
         '<div class="field">' +
           '<label class="field-label">域名</label>' +
           '<input class="field-input" type="text" value="' + esc(fullName) + '" disabled>' +
@@ -1075,69 +1154,93 @@
         '</div>' +
         '<div class="field">' +
           '<label class="field-label" for="mEditTunnel">目标隧道</label>' +
-          '<select class="field-input" id="mEditTunnel">' + tunnelOptions + '</select>' +
+          '<select class="field-input" id="mEditTunnel"><option value="">读取隧道列表中…</option></select>' +
           '<div class="form-hint">更换隧道会同步更新 Cloudflare 的 CNAME 记录。</div>' +
         '</div>' +
         '<div class="field">' +
           '<label class="field-label" for="mEditService">本地服务地址</label>' +
           '<input class="field-input" id="mEditService" type="text" value="' + esc(currentService) + '" autocomplete="off">' +
           '<div class="form-hint">例如 http://127.0.0.1:8080 或 unix:/var/run/app.sock</div>' +
-        '</div>',
-        '<button class="btn btn-ghost btn-auto" type="button" data-close>取消</button>' +
-        '<button class="btn btn-primary btn-auto" type="button" id="mEditOk">保存</button>');
+        '</div>' +
+      '</div>' +
+      '<div class="btn-row">' +
+        '<button class="btn btn-primary btn-sm btn-auto" type="button" id="mEditOk">保存</button>' +
+        '<button class="btn btn-ghost btn-sm btn-auto" type="button" data-act="detail-close">取消</button>' +
+      '</div>');
+    if (!box) return;
 
-      $("mEditService").focus();
-      $("mEditOk").addEventListener("click", function () {
-        var service = $("mEditService").value.trim();
-        var sel = $("mEditTunnel");
-        var tunnelId = sel.value;
-        var tunnelName = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].textContent : "";
-        if (!service.startsWith("http://") && !service.startsWith("https://") && !service.startsWith("unix:")) {
-          toast("本地服务地址需以 http:// / https:// / unix: 开头");
-          return;
-        }
-        var ok = this;
-        ok.disabled = true;
-        ok.textContent = "保存中…";
-        api("POST", "/ingresses/" + encodeURIComponent(id), {
-          service: service, tunnel_id: tunnelId, tunnel_name: tunnelName,
-        }).then(function () {
-          closeModal();
-          toast("规则已更新");
-          refreshIngresses();
-          refreshDnsRecords();
-        }).catch(function (err) {
-          toast("更新失败：" + err.message);
-          ok.disabled = false;
-          ok.textContent = "保存";
-        });
-      });
+    api("GET", "/tunnels").then(function (t) {
+      var sel = $("mEditTunnel");
+      if (!sel) return;
+      sel.innerHTML = ingressTunnelOptions(t.tunnels || [], currentTunnel);
+      sel.value = currentTunnel;
     }).catch(function (err) { toast("获取隧道列表失败：" + err.message); });
+
+    $("mEditService").focus();
+    $("mEditOk").onclick = function () {
+      var sel = $("mEditTunnel");
+      var service = $("mEditService").value.trim();
+      if (!serviceOk(service)) {
+        toast("本地服务地址协议不受支持（http/https/tcp/tls/ssh/rdp/unix 等）");
+        return;
+      }
+      var ok = this;
+      ok.disabled = true;
+      ok.textContent = "保存中…";
+      api("POST", "/ingresses/" + encodeURIComponent(id), {
+        service: service,
+        tunnel_id: sel.value,
+        tunnel_name: sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].textContent : "",
+      }).then(function (r) {
+        collapseDetail(item);
+        notifySync(r, "规则已更新");
+        refreshIngresses();
+        refreshDnsRecords();
+      }).catch(function (err) {
+        toast("更新失败：" + err.message);
+        ok.disabled = false;
+        ok.textContent = "保存";
+      });
+    };
   }
 
-  function deleteIngress(id, fullName) {
-    openModal("删除 Ingress 规则",
-      '<p style="margin:0 0 var(--space-2)">确定删除 <b>' + esc(fullName) + '</b> 吗？</p>' +
-      '<p style="margin:0;color:var(--theme-muted);font-size:var(--text-sm);line-height:var(--leading-relaxed)">' +
-        '本地规则与 Cloudflare DNS 记录会一起删除，不可恢复。' +
-      '</p>',
-      '<button class="btn btn-ghost btn-auto" type="button" data-close>取消</button>' +
-      '<button class="btn btn-danger btn-auto" type="button" id="mDelIngOk">删除</button>');
-    $("mDelIngOk").addEventListener("click", function () {
+  function deleteIngress(item, id, fullName) {
+    var box = toggleDetail(item, "del",
+      '<p class="row-detail-note">确定删除 <b>' + esc(fullName) + '</b> 吗？' +
+        '本地规则与 Cloudflare DNS 记录会一起删除，不可恢复；删除后会重新下发一次隧道路由。</p>' +
+      '<div class="btn-row">' +
+        '<button class="btn btn-danger btn-sm btn-auto" type="button" data-act="del-yes">确认删除</button>' +
+        '<button class="btn btn-ghost btn-sm btn-auto" type="button" data-act="detail-close">取消</button>' +
+      '</div>');
+    if (!box) return;
+    box.querySelector('[data-act="del-yes"]').onclick = function () {
       var ok = this;
       ok.disabled = true;
       ok.textContent = "删除中…";
-      api("DELETE", "/ingresses/" + encodeURIComponent(id)).then(function () {
-        closeModal();
-        toast("已删除");
+      api("DELETE", "/ingresses/" + encodeURIComponent(id)).then(function (r) {
+        collapseDetail(item);
+        notifySync(r, "已删除");
         refreshIngresses();
         refreshDnsRecords();
       }).catch(function (err) {
         toast("删除失败：" + err.message);
         ok.disabled = false;
-        ok.textContent = "删除";
+        ok.textContent = "确认删除";
       });
-    });
+    };
+  }
+
+  function onIngressClick(ev) {
+    var btn = ev.target.closest("[data-act]");
+    if (!btn) return;
+    var item = btn.closest(".ingress-item");
+    if (!item) return;
+    var act = btn.getAttribute("data-act");
+    if (act === "detail-close") { collapseDetail(item); return; }
+    var id = item.getAttribute("data-id");
+    var fullName = item.getAttribute("data-full");
+    if (act === "del") deleteIngress(item, id, fullName);
+    else if (act === "edit") editIngress(item);
   }
 
   /* ------------------------------------------------------------ Cloudflare DNS 记录 */
@@ -1151,52 +1254,54 @@
       list.innerHTML = "";
       if (!r.configured) {
         $("dnsRecordsEmpty").hidden = false;
-        $("dnsRecordsSummary").textContent = "请先在「设置」页配置 Token，并在「DNS」页选择一个 Zone";
+        $("dnsRecordsSummary").textContent = "请先在设置页配置 Token，并在上方选择一个 Zone";
         return;
       }
       if (!r.ok) {
         notice.hidden = false;
-        notice.innerHTML = '<span>⚠️</span><span>' + esc(r.error || "获取失败") + '</span>';
+        notice.innerHTML = '<span class="notice-ico">!</span><span>' + esc(r.error || "获取失败") + '</span>';
         return;
       }
       renderDnsRecords(r.records || [], r.managed_count || 0, r.total || 0);
     }).catch(function (err) {
       list.innerHTML = "";
       notice.hidden = false;
-      notice.innerHTML = '<span>⚠️</span><span>' + esc(err.message || "加载失败") + '</span>';
-      // 「接口不存在」多半是容器还在跑旧代码，直接给出自检入口
+      notice.innerHTML = '<span class="notice-ico">!</span><span>' + esc(err.message || "加载失败") + '</span>';
+      // 「接口不存在」多半是容器还在跑旧代码，直接指向自检入口
       if (/接口不存在/.test(err.message || "")) {
-        notice.innerHTML += '<button class="btn btn-ghost btn-auto" type="button" id="dnsSelfCheckBtn" ' +
-          'style="margin-left:auto;flex:none;align-self:center">运行版本自检</button>';
-        var scBtn = $("dnsSelfCheckBtn");
-        if (scBtn) scBtn.addEventListener("click", runSelfCheck);
+        notice.innerHTML += '<span style="margin-left:auto;flex:none">容器可能还在跑旧代码，点上方「版本自检」确认。</span>';
       }
     });
   }
 
   /* 版本自检：确认服务端代码里是否真的注册了这些接口 */
   function runSelfCheck() {
+    var btn = $("selfCheckBtn");
+    btn.disabled = true;
+    btn.textContent = "自检中…";
+    var el = $("selfCheckReport");
     api("GET", "/system/selfcheck").then(function (r) {
       var rows = Object.keys(r.routes_present || {}).map(function (k) {
-        var ok = r.routes_present[k];
-        return '<div class="dns-meta">' + (ok ? "✅" : "❌") + " " + esc(k) + '</div>';
+        return reportRow(!!r.routes_present[k], "接口 " + k);
       }).join("");
       var dt = new Date(r.server_mtime * 1000);
-      openModal("版本自检",
-        '<div style="font-size:var(--text-sm);line-height:var(--leading-relaxed)">' +
-          '<p style="margin:0 0 var(--space-3)">代码指纹：<b>' + esc(r.code_sha) + '</b>（v' + esc(r.version) + '）</p>' +
-          '<p style="margin:0 0 var(--space-3)">server.py 修改时间：' + esc(dt.toLocaleString()) + '</p>' +
-          '<p style="margin:0 0 var(--space-3)">进程 PID：' + esc(String(r.pid)) + '</p>' +
-          rows +
-          '<p style="margin:var(--space-4) 0 0;color:var(--theme-muted)">' +
-            (r.all_routes_ok
-              ? "代码是新的。若仍报「接口不存在」，请强制刷新浏览器缓存（Ctrl+Shift+R）。"
-              : "代码缺失对应路由。请在安装目录执行 docker compose up -d --build --force-recreate。") +
-          '</p>' +
-        '</div>',
-        '<button class="btn btn-ghost btn-auto" type="button" data-close>关闭</button>');
+      el.innerHTML =
+        reportRow(true, "代码指纹 " + r.code_sha + "（v" + r.version + "）") +
+        reportRow(true, "server.py 修改时间 " + dt.toLocaleString()) +
+        reportRow(true, "进程 PID " + r.pid) +
+        rows +
+        '<div class="report-row ' + (r.all_routes_ok ? "ok" : "bad") + '">' +
+          '<span class="report-ico">' + (r.all_routes_ok ? "✅" : "❌") + '</span><span>' +
+          (r.all_routes_ok
+            ? "代码是新的。若仍报「接口不存在」，请强制刷新浏览器缓存（Ctrl+Shift+R）。"
+            : "代码缺少对应路由。请在安装目录执行 docker compose up -d --build --force-recreate。") +
+          '</span></div>';
+      el.hidden = false;
     }).catch(function (err) {
       toast("自检失败：" + err.message);
+    }).finally(function () {
+      btn.disabled = false;
+      btn.textContent = "版本自检";
     });
   }
 
@@ -1249,7 +1354,7 @@
     $("loginForm").addEventListener("submit", onLoginSubmit);
     $("logoutBtn").addEventListener("click", logout);
     $("themeBtn").addEventListener("click", function () {
-      var next = window.__kay-cftunnleTheme.toggle();
+      var next = window.__kayCftunnleTheme.toggle();
       toast(next === "dark" ? "已切换到深色模式" : "已切换到浅色模式");
     });
     window.addEventListener("hashchange", applyRoute);
@@ -1257,6 +1362,7 @@
     // 设置页
     $("saveCfBtn").addEventListener("click", saveCfSettings);
     $("verifyCfBtn").addEventListener("click", verifyCf);
+    $("savePwBtn").addEventListener("click", savePassword);
     $("saveSysBtn").addEventListener("click", saveSystemSettings);
     $("exportConfigBtn").addEventListener("click", exportConfig);
     $("importConfigBtn").addEventListener("click", function () {
@@ -1273,14 +1379,17 @@
 
     // 隧道页
     $("newTunnelBtn").addEventListener("click", newTunnel);
+    $("refreshTunnelsBtn").addEventListener("click", refreshTunnels);
     $("tunnelsList").addEventListener("click", onTunnelsClick);
 
-    // DNS 页
+    // 域名与规则页
     $("fetchZonesBtn").addEventListener("click", refreshZones);
     $("zonesList").addEventListener("click", onZonesClick);
     $("newIngressBtn").addEventListener("click", newIngress);
+    $("syncIngressBtn").addEventListener("click", syncIngresses);
     $("ingressList").addEventListener("click", onIngressClick);
     $("refreshDnsRecordsBtn").addEventListener("click", refreshDnsRecords);
+    $("selfCheckBtn").addEventListener("click", runSelfCheck);
 
     // 连接器页
     $("refreshConnectorBtn").addEventListener("click", refreshConnector);
@@ -1293,12 +1402,13 @@
     // 总览页快速操作
     $("quickActions").addEventListener("click", onQuickAction);
 
-    // 弹层：点遮罩 / ✕ / data-close 关闭，ESC 关闭
-    $("modalRoot").addEventListener("click", function (ev) {
-      if (ev.target === this || ev.target.closest("[data-close]")) closeModal();
+    // 页内表单：取消按钮收起对应面板
+    document.addEventListener("click", function (ev) {
+      var btn = ev.target.closest("[data-form-close]");
+      if (btn) closePanel(btn.getAttribute("data-form-close"));
     });
     document.addEventListener("keydown", function (ev) {
-      if (ev.key === "Escape" && !$("modalRoot").hidden) closeModal();
+      if (ev.key === "Escape") collapseAll();
     });
 
     // 脚本出错时给可见反馈，避免“点了没反应”却无线索

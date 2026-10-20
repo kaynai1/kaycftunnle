@@ -14,6 +14,7 @@
   新建隧道  POST /accounts/{id}/cfd_tunnel
   删除隧道  DELETE /accounts/{id}/cfd_tunnel/{tid}
   隧道令牌  GET  /accounts/{id}/cfd_tunnel/{tid}/token
+  Ingress   GET/PUT /accounts/{id}/cfd_tunnel/{tid}/configurations  远程托管路由规则
 
 所有方法在 Cloudflare 返回 success=false 或 HTTP 错误时抛出 CloudflareError，
 错误里保留 CF 原始 errors 数组（含 code/message），由上层原样透出给前端。
@@ -143,13 +144,15 @@ class CloudflareClient:
         return self._request("GET", self._tunnels_base() + "/" + tunnel_id)
 
     def create_tunnel(self, name: str):
-        """创建命名隧道；config_src=cloudflared 表示 Ingress 由本地管理（M4 连接器用）。"""
+        """创建命名隧道；config_src=cloudflare 走远程托管，
+        这样 cloudflared 只需要 --token 就能启动，Ingress 由面板通过 API 下发。
+        用 cloudflared（本地托管）的话隧道令牌跑不起来，规则也无处可写。"""
         name = (name or "").strip()
         if not name:
             raise CloudflareError("隧道名称不能为空", 0)
         if len(name) > 63:
             raise CloudflareError("隧道名称不能超过 63 个字符", 0)
-        return self._request("POST", self._tunnels_base(), {"name": name, "config_src": "cloudflared"})
+        return self._request("POST", self._tunnels_base(), {"name": name, "config_src": "cloudflare"})
 
     def delete_tunnel(self, tunnel_id: str):
         """删除隧道；若仍有活跃连接，Cloudflare 会报错，需先停止连接器（M4）。"""
@@ -158,6 +161,27 @@ class CloudflareClient:
     def get_tunnel_token(self, tunnel_id: str) -> str:
         """获取隧道连接令牌（eyJ...），供 cloudflared 使用；属于敏感凭据。"""
         return self._request("GET", self._tunnels_base() + "/" + tunnel_id + "/token")
+
+    # ------------------------------------------------------------ 隧道 Ingress（远程托管）
+
+    def get_tunnel_ingress(self, tunnel_id: str):
+        """读取隧道当前 Ingress 规则。
+
+        注意路径是 configurations（复数），写成 config 会被网关直接 404 且没有错误体。
+        """
+        try:
+            result = self._request("GET", self._tunnels_base() + "/" + tunnel_id + "/configurations")
+        except CloudflareError as exc:
+            if exc.status == 404:
+                return []
+            raise
+        config = (result or {}).get("config") or {}
+        return config.get("ingress") or []
+
+    def put_tunnel_ingress(self, tunnel_id: str, ingress):
+        """整份覆盖隧道 Ingress。Cloudflare 要求最后一条是不带 hostname 的兜底规则。"""
+        return self._request("PUT", self._tunnels_base() + "/" + tunnel_id + "/configurations",
+                             {"config": {"ingress": ingress}})
 
     # ------------------------------------------------------------ DNS 记录
 

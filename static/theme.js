@@ -9,7 +9,7 @@
     theme = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   }
   document.documentElement.setAttribute("data-theme", theme);
-  window.__kay-cftunnleTheme = {
+  window.__kayCftunnleTheme = {
     get: function () { return document.documentElement.getAttribute("data-theme"); },
     set: function (t) {
       document.documentElement.setAttribute("data-theme", t);

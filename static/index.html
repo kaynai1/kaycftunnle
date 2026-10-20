@@ -2,10 +2,11 @@
 <!-- SPDX-License-Identifier: MIT · Copyright (c) 2026 EasonShu -->
 <!--
   Kay-cftunnle 面板 · 页面骨架
-  纯静态页面，无构建步骤：结构在本文件，业务交互在 app.js。
-  theme.js 提前应用明暗偏好；theme.css 定义主题令牌；styles.css 管理工作台布局。
+  纯静态页面，无构建步骤：结构在本文件，业务交互在 app.js，令牌在 theme.css，布局在 styles.css。
+  布局约定：顶部一级标签（总览 / 隧道 / 域名与规则 / 连接器 / 设置），每个标签一整页；
+  配置块由卡片承载，卡片标题与操作按钮同一行左右对齐；
+  表单与二次确认全部内嵌在页内（.form-panel / .row-detail），不使用弹窗。
   表单元素通过 id 与 app.js 约定，新增或改名时请同步搜索 app.js。
-  M2：设置页（Cloudflare 凭据 + 验证 + 改密）、隧道页（列表/新建/删除/令牌）已接入真实接口。
 -->
 <html lang="zh-CN">
 <head>
@@ -19,14 +20,15 @@
   <meta name="color-scheme" content="light dark">
   <meta name="description" content="Kay-cftunnle 面板：自托管的 Cloudflare Tunnel 管理工具，API Token 托管、隧道管理、Ingress 映射、DNS 维护与 cloudflared 连接器控制，一键部署飞牛 NAS。">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23FF6B35'/%3E%3Ctext x='16' y='23' font-size='18' text-anchor='middle' fill='white'%3E%F0%9F%9A%87%3C/text%3E%3C/svg%3E">
-  <script src="/theme.js?v=15"></script>
-  <link rel="stylesheet" href="/theme.css?v=15">
-  <link rel="stylesheet" href="/styles.css?v=15">
+  <script src="/theme.js?v=20"></script>
+  <link rel="stylesheet" href="/theme.css?v=20">
+  <link rel="stylesheet" href="/styles.css?v=20">
 </head>
 <body>
 
 <!-- ==================== 登录屏 ==================== -->
 <div class="login-screen" id="loginView">
+  <div class="login-rail" aria-hidden="true"></div>
   <form class="login-card" id="loginForm" autocomplete="off">
     <div class="login-brand">
       <div class="login-mark">🚇</div>
@@ -49,169 +51,305 @@
 
 <!-- ==================== 面板框架 ==================== -->
 <div class="shell" id="shellView" hidden>
-  <aside class="sidebar">
-    <div class="side-brand">
-      <div class="side-mark">🚇</div>
-      <span class="side-name">Kay-cftunnle 面板</span>
-    </div>
-    <nav class="side-nav">
-      <a class="side-link active" href="#/overview" data-route="overview"><span class="ico">📊</span><span class="lbl">总览</span></a>
-      <a class="side-link" href="#/tunnels" data-route="tunnels"><span class="ico">🚇</span><span class="lbl">隧道</span></a>
-      <a class="side-link" href="#/dns" data-route="dns"><span class="ico">🌐</span><span class="lbl">DNS</span></a>
-      <a class="side-link" href="#/connector" data-route="connector"><span class="ico">⚡</span><span class="lbl">连接器</span></a>
-      <a class="side-link" href="#/settings" data-route="settings"><span class="ico">⚙️</span><span class="lbl">设置</span></a>
-    </nav>
-    <div class="side-foot">
-      <button class="btn btn-ghost" id="logoutBtn" type="button" style="width:100%">退出登录</button>
-    </div>
-  </aside>
 
-  <main class="main">
-    <header class="topbar">
-      <div class="topbar-title" id="topbarTitle">总览</div>
-      <div class="topbar-actions">
-        <button class="icon-btn" id="themeBtn" type="button" title="切换明暗主题">🌗</button>
+  <!-- 顶部一级标签 -->
+  <header class="topnav">
+    <div class="topnav-bar">
+      <a class="brand" href="#/overview">
+        <span class="brand-mark">🚇</span>
+        <span class="brand-txt">
+          <span class="brand-name">Kay-cftunnle</span>
+          <span class="brand-sub">Tunnel 控制台</span>
+        </span>
+      </a>
+
+      <nav class="tabbar" aria-label="主导航">
+        <a class="tab-link" href="#/overview" data-route="overview"><span class="tab-no">01</span><span class="tab-lbl">总览</span></a>
+        <a class="tab-link" href="#/tunnels" data-route="tunnels"><span class="tab-no">02</span><span class="tab-lbl">隧道</span></a>
+        <a class="tab-link" href="#/dns" data-route="dns"><span class="tab-no">03</span><span class="tab-lbl">域名与规则</span></a>
+        <a class="tab-link" href="#/connector" data-route="connector"><span class="tab-no">04</span><span class="tab-lbl">连接器</span></a>
+        <a class="tab-link" href="#/settings" data-route="settings"><span class="tab-no">05</span><span class="tab-lbl">设置</span></a>
+      </nav>
+
+      <div class="topnav-actions">
+        <div class="live-chip" id="liveChip" title="cloudflared 连接器状态">
+          <span class="dot is-idle" id="liveDot"></span>
+          <span id="liveText">检测中</span>
+        </div>
+        <button class="icon-btn" id="themeBtn" type="button" title="切换明暗主题">◐</button>
         <div class="user-chip">
           <span class="user-avatar" id="userAvatar">A</span>
           <span id="userName">admin</span>
         </div>
+        <button class="icon-btn" id="logoutBtn" type="button" title="退出登录">⏻</button>
       </div>
-    </header>
+    </div>
+    <div class="topnav-rail" aria-hidden="true"><span class="topnav-rail-run"></span></div>
+  </header>
 
+  <main class="main">
     <div class="content">
-      <!-- 总览 -->
-      <section class="view active" id="view-overview">
+
+      <!-- ============ 01 总览 ============ -->
+      <section class="view" id="view-overview">
+        <div class="page-head">
+          <div class="page-eyebrow">01 / Overview</div>
+          <h1 class="page-title">总览</h1>
+          <p class="page-sub">一眼确认隧道、规则与连接器是否都在位。</p>
+        </div>
+
         <div class="notice" id="cfNotice" hidden>
-          <span>⚠️</span>
+          <span class="notice-ico">!</span>
           <span>尚未配置 Cloudflare API Token，隧道与 DNS 功能不可用。请先到<b>设置</b>页填入 Token。</span>
         </div>
+
         <div class="stat-grid">
-          <div class="stat"><span class="stat-n" id="statTunnels">–</span><span class="stat-l">隧道总数</span></div>
-          <div class="stat"><span class="stat-n" id="statRules">–</span><span class="stat-l">Ingress 规则</span></div>
-          <div class="stat"><span class="stat-n" id="statConnector">–</span><span class="stat-l">连接器状态</span></div>
-          <div class="stat"><span class="stat-n" id="statZone">–</span><span class="stat-l">默认 Zone</span></div>
+          <div class="stat"><span class="stat-k">隧道总数</span><span class="stat-n" id="statTunnels">–</span><span class="stat-s">Cloudflare 账号内</span></div>
+          <div class="stat"><span class="stat-k">Ingress 规则</span><span class="stat-n" id="statRules">–</span><span class="stat-s">子域名 → 本地服务</span></div>
+          <div class="stat"><span class="stat-k">连接器</span><span class="stat-n stat-n-sm" id="statConnector">–</span><span class="stat-s">cloudflared 进程</span></div>
+          <div class="stat"><span class="stat-k">默认 Zone</span><span class="stat-n stat-n-sm" id="statZone">–</span><span class="stat-s">Ingress 取此域名</span></div>
         </div>
+
         <div class="card">
-          <h2 class="card-title">⚡ 快速操作</h2>
+          <div class="card-head">
+            <div class="card-head-txt">
+              <h2 class="card-title">快速操作</h2>
+              <p class="card-sub">按部署顺序排列，四个动作即可跑通一条隧道。</p>
+            </div>
+          </div>
           <div class="quick-actions" id="quickActions">
             <button class="qa-btn" type="button" data-action="settings">
-              <span class="qa-ico">🔑</span>
+              <span class="qa-ico">1</span>
               <span class="qa-t">配置 Token</span>
               <span class="qa-s">前往设置页填写 Cloudflare 凭据</span>
             </button>
             <button class="qa-btn" type="button" data-action="tunnel">
-              <span class="qa-ico">🚇</span>
+              <span class="qa-ico">2</span>
               <span class="qa-t">新建隧道</span>
               <span class="qa-s">在 Cloudflare 创建命名隧道</span>
             </button>
-            <button class="qa-btn" type="button" data-action="connector">
-              <span class="qa-ico">⚡</span>
-              <span class="qa-t">启动连接器</span>
-              <span class="qa-s">运行 cloudflared 连接默认隧道</span>
-            </button>
             <button class="qa-btn" type="button" data-action="ingress">
-              <span class="qa-ico">🚧</span>
+              <span class="qa-ico">3</span>
               <span class="qa-t">添加规则</span>
               <span class="qa-s">把子域名映射到 NAS 本地服务</span>
             </button>
+            <button class="qa-btn" type="button" data-action="connector">
+              <span class="qa-ico">4</span>
+              <span class="qa-t">启动连接器</span>
+              <span class="qa-s">运行 cloudflared 连接默认隧道</span>
+            </button>
           </div>
         </div>
-        <div class="card">
-          <h2 class="card-title">🖥️ 系统信息</h2>
-          <div class="sys-info" id="sysInfoOverview">
-            <div class="sys-row"><span class="sys-k">面板版本</span><span class="sys-v" id="sysVersion">–</span></div>
-            <div class="sys-row"><span class="sys-k">服务运行时间</span><span class="sys-v" id="sysUptime">–</span></div>
-            <div class="sys-row"><span class="sys-k">数据目录</span><span class="sys-v" id="sysDataDir">–</span></div>
-            <div class="sys-row"><span class="sys-k">cloudflared 版本</span><span class="sys-v" id="sysCfVersion">–</span></div>
-            <div class="sys-row"><span class="sys-k">当前连接隧道</span><span class="sys-v" id="sysCurrentTunnel">–</span></div>
+
+        <div class="split-grid">
+          <div class="card">
+            <div class="card-head">
+              <div class="card-head-txt">
+                <h2 class="card-title">一条规则怎么才算通</h2>
+                <p class="card-sub">三件事同时成立，浏览器才可能访问到域名。</p>
+              </div>
+            </div>
+            <ol class="step-list">
+              <li>
+                <span class="step-no">1</span>
+                <span class="step-b"><b>隧道路由已下发</b>Cloudflare 侧 Ingress 里要有这个 hostname，并且末尾保留一条不带域名的兜底规则。保存规则时面板会自动下发；失败会出现「路由未下发」标签，可在本页「重新下发路由」。</span>
+              </li>
+              <li>
+                <span class="step-no">2</span>
+                <span class="step-b"><b>DNS 指向隧道</b>子域名要有一条<b>已代理</b>的 CNAME 指向 <code class="kv">&lt;tunnel-id&gt;.cfargotunnel.com</code>。缺少时规则上会出现「DNS 已缺失」标签。</span>
+              </li>
+              <li>
+                <span class="step-no">3</span>
+                <span class="step-b"><b>连接器正在运行</b>本机 cloudflared 用该隧道的令牌连上云端，流量才会送进 NAS。令牌可在隧道页「令牌」取得。</span>
+              </li>
+            </ol>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div class="card-head-txt">
+                <h2 class="card-title">系统信息</h2>
+                <p class="card-sub">面板版本、运行时长与 cloudflared 状态。</p>
+              </div>
+              <div class="card-acts">
+                <a class="btn btn-ghost btn-sm btn-auto" href="#/settings">备份与凭据</a>
+              </div>
+            </div>
+            <div class="sys-info" id="sysInfoOverview">
+              <div class="sys-row"><span class="sys-k">面板版本</span><span class="sys-v" id="sysVersion">–</span></div>
+              <div class="sys-row"><span class="sys-k">服务运行时间</span><span class="sys-v" id="sysUptime">–</span></div>
+              <div class="sys-row"><span class="sys-k">数据目录</span><span class="sys-v" id="sysDataDir">–</span></div>
+              <div class="sys-row"><span class="sys-k">cloudflared 版本</span><span class="sys-v" id="sysCfVersion">–</span></div>
+              <div class="sys-row"><span class="sys-k">当前连接隧道</span><span class="sys-v" id="sysCurrentTunnel">–</span></div>
+            </div>
           </div>
         </div>
+
         <div class="card">
-          <h2 class="card-title">🕘 最近操作</h2>
+          <div class="card-head">
+            <div class="card-head-txt">
+              <h2 class="card-title">最近操作</h2>
+              <p class="card-sub">面板写入的关键动作留痕。</p>
+            </div>
+          </div>
           <ul class="log-list" id="logList"><li class="log-empty">加载中…</li></ul>
         </div>
       </section>
 
-      <!-- 隧道 -->
+      <!-- ============ 02 隧道 ============ -->
       <section class="view" id="view-tunnels">
-        <div class="view-head">
-          <div>
-            <div class="view-head-t">Cloudflare 命名隧道</div>
-            <div class="view-head-s">创建 / 删除隧道，一键连接或断开；同一时间只能连接一条隧道</div>
-          </div>
-          <button class="btn btn-primary btn-auto" id="newTunnelBtn" type="button">＋ 新建隧道</button>
+        <div class="page-head">
+          <div class="page-eyebrow">02 / Tunnels</div>
+          <h1 class="page-title">隧道</h1>
+          <p class="page-sub">创建 / 删除 Cloudflare 命名隧道，一键连接或断开。同一时间只能连接一条隧道。</p>
         </div>
-        <div class="notice" id="tunnelsNotice" hidden></div>
-        <div id="tunnelsList"></div>
-        <div class="empty-state" id="tunnelsEmpty" hidden>
-          <div class="empty-ico">🚇</div>
-          <div class="empty-t" id="tunnelsEmptyT">还没有隧道</div>
-          <div class="empty-s" id="tunnelsEmptyS">点击右上角「新建隧道」创建第一条</div>
+
+        <div class="form-panel" id="tunnelForm" hidden>
+          <div class="form-panel-head">
+            <span class="eyebrow">新建</span>
+            <span class="form-panel-title">创建命名隧道</span>
+          </div>
+          <div class="form-grid">
+            <div class="field">
+              <label class="field-label" for="mTunnelName">隧道名称</label>
+              <input class="field-input" id="mTunnelName" type="text" maxlength="63" placeholder="例如 my-nas" autocomplete="off">
+              <div class="form-hint">小写字母、数字与连字符，1-63 位；名称在账号内唯一。</div>
+            </div>
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-primary btn-auto" type="button" id="mTunnelOk">创建隧道</button>
+            <button class="btn btn-ghost btn-auto" type="button" data-form-close="tunnelForm">取消</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div class="card-head-txt">
+              <h2 class="card-title">隧道列表</h2>
+              <p class="card-sub">「已连接」表示云端活跃，且本机 cloudflared 正在跑这条隧道。</p>
+            </div>
+            <div class="card-acts">
+              <button class="btn btn-ghost btn-auto" id="refreshTunnelsBtn" type="button">刷新</button>
+              <button class="btn btn-primary btn-auto" id="newTunnelBtn" type="button">＋ 新建隧道</button>
+            </div>
+          </div>
+          <div class="notice" id="tunnelsNotice" hidden></div>
+          <div id="tunnelsList"></div>
+          <div class="empty-state" id="tunnelsEmpty" hidden></div>
         </div>
       </section>
 
-      <!-- DNS -->
+      <!-- ============ 03 域名与规则 ============ -->
       <section class="view" id="view-dns">
-        <div class="view-head">
-          <div>
-            <div class="view-head-t">DNS / Zone 管理</div>
-            <div class="view-head-s">从 Cloudflare 拉取账号下的域名，选择用于 Ingress 的默认 Zone</div>
-          </div>
-          <button class="btn btn-primary btn-auto" id="fetchZonesBtn" type="button">获取域名列表</button>
-        </div>
-        <div class="notice" id="zonesNotice" hidden></div>
-        <div id="zonesList"></div>
-        <div class="empty-state" id="zonesEmpty" hidden>
-          <div class="empty-ico">🌐</div>
-          <div class="empty-t">还没有获取域名</div>
-          <div class="empty-s">点击右上角「获取域名列表」拉取账号下的 Zone</div>
+        <div class="page-head">
+          <div class="page-eyebrow">03 / Zones &amp; Ingress</div>
+          <h1 class="page-title">域名与规则</h1>
+          <p class="page-sub">选 Zone → 写规则 → 下发路由，三步都在这一页完成。</p>
         </div>
 
-        <div class="card" style="margin-top:var(--space-8)">
-          <div class="view-head" style="padding:0;margin-bottom:var(--space-5)">
-            <div>
-              <div class="view-head-t">🚧 Ingress 规则</div>
-              <div class="view-head-s">子域名 → 本地服务；保存时自动创建 Cloudflare CNAME 记录</div>
+        <div class="card">
+          <div class="card-head">
+            <div class="card-head-txt">
+              <h2 class="card-title">Cloudflare 域名（Zone）</h2>
+              <p class="card-sub">从账号拉取域名，选中的一条作为添加规则时的默认 Zone。</p>
             </div>
-            <button class="btn btn-primary btn-auto" id="newIngressBtn" type="button">＋ 添加规则</button>
+            <div class="card-acts">
+              <button class="btn btn-primary btn-auto" id="fetchZonesBtn" type="button">获取域名列表</button>
+            </div>
           </div>
+          <div class="notice" id="zonesNotice" hidden></div>
+          <div id="zonesList"></div>
+          <div class="empty-state" id="zonesEmpty" hidden></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div class="card-head-txt">
+              <h2 class="card-title">Ingress 规则</h2>
+              <p class="card-sub">子域名 → 本地服务；保存时写入隧道路由并创建已代理 CNAME。</p>
+            </div>
+            <div class="card-acts">
+              <button class="btn btn-ghost btn-auto" id="syncIngressBtn" type="button">↻ 重新下发路由</button>
+              <button class="btn btn-primary btn-auto" id="newIngressBtn" type="button">＋ 添加规则</button>
+            </div>
+          </div>
+
+          <div class="form-panel" id="ingressForm" hidden>
+            <div class="form-panel-head">
+              <span class="eyebrow">新建</span>
+              <span class="form-panel-title">添加 Ingress 规则</span>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label class="field-label" for="mIngSubdomain">子域名前缀</label>
+                <input class="field-input" id="mIngSubdomain" type="text" placeholder="例如 nas" autocomplete="off">
+                <div class="form-hint">小写字母 / 数字 / 连字符，1-63 位；@ 为根域名，* 为泛域名。</div>
+              </div>
+              <div class="field">
+                <label class="field-label" for="mIngZone">目标 Zone</label>
+                <select class="field-input" id="mIngZone"></select>
+              </div>
+              <div class="field">
+                <label class="field-label" for="mIngTunnel">目标隧道</label>
+                <select class="field-input" id="mIngTunnel"></select>
+              </div>
+              <div class="field">
+                <label class="field-label" for="mIngService">本地服务地址</label>
+                <input class="field-input" id="mIngService" type="text" placeholder="http://127.0.0.1:8080 或 ssh://127.0.0.1:22" autocomplete="off">
+                <div class="form-hint">面板会把该隧道的所有规则整份下发，末尾自动补兜底规则。</div>
+              </div>
+            </div>
+            <div class="btn-row">
+              <button class="btn btn-primary btn-auto" type="button" id="mIngOk">创建规则</button>
+              <button class="btn btn-ghost btn-auto" type="button" data-form-close="ingressForm">取消</button>
+            </div>
+          </div>
+
           <div class="notice" id="ingressNotice" hidden></div>
           <div id="ingressList"></div>
-          <div class="empty-state" id="ingressEmpty" hidden>
-            <div class="empty-ico">🚧</div>
-            <div class="empty-t">还没有 Ingress 规则</div>
-            <div class="empty-s">点击右上角「添加规则」把子域名映射到 NAS 本地服务</div>
-          </div>
+          <div class="empty-state" id="ingressEmpty" hidden></div>
         </div>
 
-        <div class="card" style="margin-top:var(--space-8)">
-          <div class="view-head" style="padding:0;margin-bottom:var(--space-5)">
-            <div>
-              <div class="view-head-t">📋 Cloudflare DNS 记录</div>
-              <div class="view-head-s" id="dnsRecordsSummary">当前 Zone 下的全部 DNS 记录，标注本面板维护的条目</div>
+        <div class="card">
+          <div class="card-head">
+            <div class="card-head-txt">
+              <h2 class="card-title">Cloudflare DNS 记录</h2>
+              <p class="card-sub" id="dnsRecordsSummary">当前 Zone 下的全部 DNS 记录，标注本面板维护的条目。</p>
             </div>
-            <button class="btn btn-ghost btn-auto" id="refreshDnsRecordsBtn" type="button">刷新记录</button>
+            <div class="card-acts">
+              <button class="btn btn-ghost btn-auto" id="selfCheckBtn" type="button">版本自检</button>
+              <button class="btn btn-primary btn-auto" id="refreshDnsRecordsBtn" type="button">刷新记录</button>
+            </div>
           </div>
+          <div class="report" id="selfCheckReport" hidden></div>
           <div class="notice" id="dnsRecordsNotice" hidden></div>
           <div id="dnsRecordsList"></div>
           <div class="empty-state" id="dnsRecordsEmpty" hidden>
-            <div class="empty-ico">📋</div>
+            <div class="empty-ring" aria-hidden="true"></div>
             <div class="empty-t">还没有加载记录</div>
             <div class="empty-s">点击右上角「刷新记录」拉取当前 Zone 的 DNS 记录</div>
           </div>
         </div>
       </section>
 
-      <!-- 连接器 -->
+      <!-- ============ 04 连接器 ============ -->
       <section class="view" id="view-connector">
-        <div class="view-head">
-          <div>
-            <div class="view-head-t">cloudflared 连接器</div>
-            <div class="view-head-s">启动 / 停止 / 重启进程，查看实时日志</div>
-          </div>
-          <button class="btn btn-ghost btn-auto" id="refreshConnectorBtn" type="button">刷新状态</button>
+        <div class="page-head">
+          <div class="page-eyebrow">04 / Connector</div>
+          <h1 class="page-title">连接器</h1>
+          <p class="page-sub">托管 cloudflared 进程：启动 / 停止 / 重启，意外退出由看门狗自动拉起。</p>
         </div>
+
         <div class="card connector-card" id="connectorCard">
+          <div class="card-head">
+            <div class="card-head-txt">
+              <h2 class="card-title">运行状态</h2>
+              <p class="card-sub">数值来自服务端实测，刷新即可。</p>
+            </div>
+            <div class="card-acts">
+              <button class="btn btn-ghost btn-auto" id="refreshConnectorBtn" type="button">刷新状态</button>
+            </div>
+          </div>
           <div class="connector-grid">
             <div class="connector-stat">
               <div class="connector-label">运行状态</div>
@@ -219,18 +357,28 @@
             </div>
             <div class="connector-stat">
               <div class="connector-label">cloudflared</div>
-              <div class="connector-value" id="connBinary">加载中…</div>
+              <div class="connector-value connector-val-sm" id="connBinary">加载中…</div>
             </div>
             <div class="connector-stat">
               <div class="connector-label">协议 / IP</div>
-              <div class="connector-value" id="connProto">加载中…</div>
+              <div class="connector-value connector-val-sm" id="connProto">加载中…</div>
             </div>
             <div class="connector-stat">
               <div class="connector-label">PID / 运行时间</div>
-              <div class="connector-value" id="connPidUptime">加载中…</div>
+              <div class="connector-value connector-val-sm" id="connPidUptime">加载中…</div>
             </div>
           </div>
-          <div class="connector-row" style="margin-top:var(--space-5)">
+          <div class="connector-watchdog" id="connWatchdog" hidden></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div class="card-head-txt">
+              <h2 class="card-title">连接控制</h2>
+              <p class="card-sub">默认隧道决定点「启动」时连哪一条；隧道页的「连接」直接连指定隧道。</p>
+            </div>
+          </div>
+          <div class="connector-row">
             <div class="field" style="margin-bottom:0;min-width:240px;flex:1">
               <label class="field-label" for="connDefaultTunnel">默认隧道</label>
               <select class="field-input" id="connDefaultTunnel"><option value="">自动选择第一条隧道</option></select>
@@ -241,18 +389,26 @@
           </div>
           <div class="btn-row" style="margin-top:var(--space-5)">
             <button class="btn btn-primary btn-auto" id="startConnectorBtn" type="button">▶ 启动</button>
-            <button class="btn btn-ghost btn-auto" id="stopConnectorBtn" type="button">⏹ 停止</button>
+            <button class="btn btn-ghost btn-auto" id="stopConnectorBtn" type="button">■ 停止</button>
             <button class="btn btn-ghost btn-auto" id="restartConnectorBtn" type="button">↻ 重启</button>
           </div>
-          <div class="form-hint" style="margin-top:var(--space-4)">启动前请确保已配置 Cloudflare 凭据并创建隧道。</div>
-          <div class="connector-watchdog" id="connWatchdog" hidden></div>
+          <div class="form-hint" style="margin-top:var(--space-4)">启动前请确保已在设置页保存 Cloudflare 凭据，并在隧道页创建至少一条隧道。</div>
         </div>
+
         <div class="card">
-          <h2 class="card-title">⚙️ 系统设置</h2>
+          <div class="card-head">
+            <div class="card-head-txt">
+              <h2 class="card-title">连接器行为</h2>
+              <p class="card-sub">这些参数在下次启动 / 重启 cloudflared 时生效。</p>
+            </div>
+            <div class="card-acts">
+              <button class="btn btn-primary btn-auto" id="saveSysBtn" type="button">保存设置</button>
+            </div>
+          </div>
           <div class="settings-row">
             <div>
               <div class="settings-row-t">系统重启后自动连接</div>
-              <div class="settings-row-s">系统启动时自动连接上次使用的 Tunnel</div>
+              <div class="settings-row-s">服务启动时自动连接上次使用的隧道</div>
             </div>
             <label class="switch">
               <input type="checkbox" id="sysAutoConnect">
@@ -276,6 +432,7 @@
                 <option value="http2">HTTP/2（推荐）</option>
                 <option value="quic">QUIC（默认）</option>
               </select>
+              <div class="form-hint">HTTP/2 走 443，端口受限时比 QUIC 更稳。</div>
             </div>
             <div class="field" style="margin-bottom:0">
               <label class="field-label" for="sysIPVersion">IP 版本</label>
@@ -283,17 +440,18 @@
                 <option value="ipv4">IPv4</option>
                 <option value="ipv6">IPv6（有 IPv6 建议）</option>
               </select>
+              <div class="form-hint">原生 IPv6 可命中更多 Cloudflare 边缘。</div>
             </div>
           </div>
-          <div class="btn-row" style="margin-top:var(--space-5)">
-            <button class="btn btn-primary btn-auto" id="saveSysBtn" type="button">保存设置</button>
-          </div>
-          <div class="form-hint">以上设置由连接器启动时读取，可提前保存。</div>
         </div>
+
         <div class="card">
-          <div class="log-head">
-            <h2 class="card-title" style="margin:0">📋 最近日志</h2>
-            <div class="log-controls">
+          <div class="card-head">
+            <div class="card-head-txt">
+              <h2 class="card-title">进程日志</h2>
+              <p class="card-sub">最近 200 行；502 / 1033 这类问题先来这里找原因。</p>
+            </div>
+            <div class="card-acts">
               <label class="log-auto">
                 <input type="checkbox" id="connAutoScroll" checked>
                 <span>自动滚动</span>
@@ -305,10 +463,25 @@
         </div>
       </section>
 
-      <!-- 设置 -->
+      <!-- ============ 05 设置 ============ -->
       <section class="view" id="view-settings">
+        <div class="page-head">
+          <div class="page-eyebrow">05 / Settings</div>
+          <h1 class="page-title">设置</h1>
+          <p class="page-sub">Cloudflare 凭据、面板密码与配置备份，全部保存在本机数据目录。</p>
+        </div>
+
         <div class="card">
-          <h2 class="card-title">🔑 Cloudflare 凭据</h2>
+          <div class="card-head">
+            <div class="card-head-txt">
+              <h2 class="card-title">Cloudflare 凭据</h2>
+              <p class="card-sub">先「测试配置」确认权限齐不齐，再保存。</p>
+            </div>
+            <div class="card-acts">
+              <button class="btn btn-ghost btn-auto" id="verifyCfBtn" type="button">测试配置</button>
+              <button class="btn btn-primary btn-auto" id="saveCfBtn" type="button">保存配置</button>
+            </div>
+          </div>
           <details class="hint-details">
             <summary>创建 API Token 需要哪些权限？</summary>
             <ul class="hint-list">
@@ -318,27 +491,84 @@
             </ul>
             <p class="form-hint" style="margin:0;">在 <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener">Cloudflare API Tokens</a> 创建「自定义令牌」时按以上勾选即可。</p>
           </details>
-          <div class="field">
-            <label class="field-label" for="cfAccount">Account ID</label>
-            <input class="field-input" id="cfAccount" type="text" placeholder="例如 78b18be0168516e1b92a74d17949bf8d" autocomplete="off">
-            <div class="form-hint">测试配置后自动获取；多账号需手动填写</div>
-          </div>
-          <div class="field">
-            <label class="field-label" for="cfToken">API Token</label>
-            <div class="input-wrap">
-              <input class="field-input" id="cfToken" type="password" placeholder="粘贴 API Token" autocomplete="off">
-              <button class="input-eye" id="cfTokenEye" type="button" title="显示 / 隐藏">👁</button>
+          <div class="form-grid">
+            <div class="field">
+              <label class="field-label" for="cfAccount">Account ID</label>
+              <input class="field-input" id="cfAccount" type="text" placeholder="例如 78b18be0168516e1b92a74d17949bf8d" autocomplete="off">
+              <div class="form-hint">测试配置后自动获取；多账号需手动填写</div>
             </div>
-            <div class="form-hint" id="cfTokenMasked"></div>
-          </div>
-          <div class="btn-row">
-            <button class="btn btn-ghost btn-auto" id="verifyCfBtn" type="button">测试配置</button>
-            <button class="btn btn-primary btn-auto" id="saveCfBtn" type="button">保存配置</button>
+            <div class="field">
+              <label class="field-label" for="cfToken">API Token</label>
+              <div class="input-wrap">
+                <input class="field-input" id="cfToken" type="password" placeholder="粘贴 API Token" autocomplete="off">
+                <button class="input-eye" id="cfTokenEye" type="button" title="显示 / 隐藏">◉</button>
+              </div>
+              <div class="form-hint" id="cfTokenMasked"></div>
+            </div>
           </div>
           <div class="report" id="cfReport" hidden></div>
         </div>
+
         <div class="card">
-          <h2 class="card-title">🖥️ 系统信息</h2>
+          <div class="card-head">
+            <div class="card-head-txt">
+              <h2 class="card-title">面板密码</h2>
+              <p class="card-sub">修改后所有会话立即失效，需要用新密码重新登录。</p>
+            </div>
+          </div>
+          <div class="form-grid">
+            <div class="field">
+              <label class="field-label" for="pwOld">当前密码</label>
+              <input class="field-input" id="pwOld" type="password" placeholder="••••••••" autocomplete="current-password">
+            </div>
+            <div class="field">
+              <label class="field-label" for="pwNew">新密码</label>
+              <input class="field-input" id="pwNew" type="password" placeholder="至少 8 位" autocomplete="new-password">
+              <div class="form-hint">至少 8 位。若 API Token 曾外泄，请同时到 Cloudflare 后台轮换 Token。</div>
+            </div>
+            <div class="field">
+              <label class="field-label" for="pwNew2">确认新密码</label>
+              <input class="field-input" id="pwNew2" type="password" placeholder="再输入一次" autocomplete="new-password">
+            </div>
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-primary btn-auto" id="savePwBtn" type="button">修改密码</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div class="card-head-txt">
+              <h2 class="card-title">配置备份</h2>
+              <p class="card-sub">导出为 JSON（含 API Token，请妥善保管）；换机、重装或误操作后用它还原。</p>
+            </div>
+            <div class="card-acts">
+              <button class="btn btn-ghost btn-auto" id="exportConfigBtn" type="button">导出配置</button>
+              <button class="btn btn-ghost btn-auto" id="importConfigBtn" type="button">导入配置</button>
+              <input type="file" id="importConfigFile" accept="application/json,.json" hidden>
+            </div>
+          </div>
+          <div class="form-panel" id="importConfirm" hidden>
+            <div class="form-panel-head">
+              <span class="eyebrow">确认</span>
+              <span class="form-panel-title">将覆盖当前 Cloudflare 凭据与连接器设置</span>
+            </div>
+            <div class="sys-info" id="importSummary"></div>
+            <div class="btn-row">
+              <button class="btn btn-primary btn-auto" type="button" id="mImportOk">确认导入</button>
+              <button class="btn btn-ghost btn-auto" type="button" data-form-close="importConfirm">取消</button>
+            </div>
+          </div>
+          <div class="form-hint" id="backupHint"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div class="card-head-txt">
+              <h2 class="card-title">系统信息</h2>
+              <p class="card-sub">反馈问题时请附上面板版本与 cloudflared 版本。</p>
+            </div>
+          </div>
           <div class="sys-info" id="sysInfoSettings">
             <div class="sys-row"><span class="sys-k">面板版本</span><span class="sys-v" id="sysVersionSettings">–</span></div>
             <div class="sys-row"><span class="sys-k">服务运行时间</span><span class="sys-v" id="sysUptimeSettings">–</span></div>
@@ -348,26 +578,14 @@
             <div class="sys-row"><span class="sys-k">服务进程 / Python</span><span class="sys-v" id="sysPidSettings">–</span></div>
           </div>
         </div>
-        <div class="card">
-          <h2 class="card-title">💾 配置备份</h2>
-          <p class="form-hint" style="margin:0 0 var(--space-4);">
-            导出会把当前配置（Token、账号、Zone、连接器设置）导出成 JSON，不含密码与会话密钥。
-            换机、重装或误操作后可用「导入」还原。
-          </p>
-          <div class="btn-row" style="margin-top:0">
-            <button class="btn btn-ghost btn-auto" id="exportConfigBtn" type="button">导出配置</button>
-            <button class="btn btn-ghost btn-auto" id="importConfigBtn" type="button">导入配置</button>
-            <input type="file" id="importConfigFile" accept="application/json,.json" hidden>
-          </div>
-          <div class="form-hint" id="backupHint" style="margin-top:var(--space-3)"></div>
-        </div>
       </section>
+
     </div>
   </main>
 </div>
 
 <div class="toast" id="toast"></div>
-<div class="modal-overlay" id="modalRoot" hidden></div>
-<script src="/app.js?v=15"></script>
+
+<script src="/app.js?v=20"></script>
 </body>
 </html>
