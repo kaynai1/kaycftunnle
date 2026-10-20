@@ -3,7 +3,7 @@
 <!--
   Kay-cftunnle 面板 · 页面骨架
   纯静态页面，无构建步骤：结构在本文件，业务交互在 app.js，令牌在 theme.css，布局在 styles.css。
-  布局约定：顶部一级标签（总览 / 隧道 / 域名与规则 / 连接器 / 设置），每个标签一整页；
+  布局约定：顶部一级标签（总览 / 隧道 / 域名与 DNS / 连接器 / 设置），每个标签一整页；
   配置块由卡片承载，卡片标题与操作按钮同一行左右对齐；
   表单与二次确认全部内嵌在页内（.form-panel / .row-detail），不使用弹窗。
   表单元素通过 id 与 app.js 约定，新增或改名时请同步搜索 app.js。
@@ -20,9 +20,9 @@
   <meta name="color-scheme" content="light dark">
   <meta name="description" content="Kay-cftunnle 面板：自托管的 Cloudflare Tunnel 管理工具，API Token 托管、隧道管理、Ingress 映射、DNS 维护与 cloudflared 连接器控制，一键部署飞牛 NAS。">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23FF6B35'/%3E%3Ctext x='16' y='23' font-size='18' text-anchor='middle' fill='white'%3E%F0%9F%9A%87%3C/text%3E%3C/svg%3E">
-  <script src="/theme.js?v=20"></script>
-  <link rel="stylesheet" href="/theme.css?v=20">
-  <link rel="stylesheet" href="/styles.css?v=20">
+  <script src="/theme.js?v=22"></script>
+  <link rel="stylesheet" href="/theme.css?v=22">
+  <link rel="stylesheet" href="/styles.css?v=22">
 </head>
 <body>
 
@@ -66,7 +66,7 @@
       <nav class="tabbar" aria-label="主导航">
         <a class="tab-link" href="#/overview" data-route="overview"><span class="tab-no">01</span><span class="tab-lbl">总览</span></a>
         <a class="tab-link" href="#/tunnels" data-route="tunnels"><span class="tab-no">02</span><span class="tab-lbl">隧道</span></a>
-        <a class="tab-link" href="#/dns" data-route="dns"><span class="tab-no">03</span><span class="tab-lbl">域名与规则</span></a>
+        <a class="tab-link" href="#/dns" data-route="dns"><span class="tab-no">03</span><span class="tab-lbl">域名与 DNS</span></a>
         <a class="tab-link" href="#/connector" data-route="connector"><span class="tab-no">04</span><span class="tab-lbl">连接器</span></a>
         <a class="tab-link" href="#/settings" data-route="settings"><span class="tab-no">05</span><span class="tab-lbl">设置</span></a>
       </nav>
@@ -152,7 +152,7 @@
             <ol class="step-list">
               <li>
                 <span class="step-no">1</span>
-                <span class="step-b"><b>隧道路由已下发</b>Cloudflare 侧 Ingress 里要有这个 hostname，并且末尾保留一条不带域名的兜底规则。保存规则时面板会自动下发；失败会出现「路由未下发」标签，可在本页「重新下发路由」。</span>
+                <span class="step-b"><b>隧道路由已下发</b>Cloudflare 侧 Ingress 里要有这个 hostname，并且末尾保留一条不带域名的兜底规则。保存规则时面板会自动下发；失败会出现「路由未下发」标签，到「隧道」页点「重新下发路由」。</span>
               </li>
               <li>
                 <span class="step-no">2</span>
@@ -201,7 +201,7 @@
         <div class="page-head">
           <div class="page-eyebrow">02 / Tunnels</div>
           <h1 class="page-title">隧道</h1>
-          <p class="page-sub">创建 / 删除 Cloudflare 命名隧道，一键连接或断开。同一时间只能连接一条隧道。</p>
+          <p class="page-sub">创建 / 删除 Cloudflare 命名隧道，一键连接或断开；Ingress 规则在下方按隧道维护。</p>
         </div>
 
         <div class="form-panel" id="tunnelForm" hidden>
@@ -237,36 +237,12 @@
           <div id="tunnelsList"></div>
           <div class="empty-state" id="tunnelsEmpty" hidden></div>
         </div>
-      </section>
-
-      <!-- ============ 03 域名与规则 ============ -->
-      <section class="view" id="view-dns">
-        <div class="page-head">
-          <div class="page-eyebrow">03 / Zones &amp; Ingress</div>
-          <h1 class="page-title">域名与规则</h1>
-          <p class="page-sub">选 Zone → 写规则 → 下发路由，三步都在这一页完成。</p>
-        </div>
-
-        <div class="card">
-          <div class="card-head">
-            <div class="card-head-txt">
-              <h2 class="card-title">Cloudflare 域名（Zone）</h2>
-              <p class="card-sub">从账号拉取域名，选中的一条作为添加规则时的默认 Zone。</p>
-            </div>
-            <div class="card-acts">
-              <button class="btn btn-primary btn-auto" id="fetchZonesBtn" type="button">获取域名列表</button>
-            </div>
-          </div>
-          <div class="notice" id="zonesNotice" hidden></div>
-          <div id="zonesList"></div>
-          <div class="empty-state" id="zonesEmpty" hidden></div>
-        </div>
 
         <div class="card">
           <div class="card-head">
             <div class="card-head-txt">
               <h2 class="card-title">Ingress 规则</h2>
-              <p class="card-sub">子域名 → 本地服务；保存时写入隧道路由并创建已代理 CNAME。</p>
+              <p class="card-sub">子域名 → 本地服务；保存时写入所选隧道的路由并创建已代理 CNAME。</p>
             </div>
             <div class="card-acts">
               <button class="btn btn-ghost btn-auto" id="syncIngressBtn" type="button">↻ 重新下发路由</button>
@@ -308,6 +284,30 @@
           <div class="notice" id="ingressNotice" hidden></div>
           <div id="ingressList"></div>
           <div class="empty-state" id="ingressEmpty" hidden></div>
+        </div>
+      </section>
+
+      <!-- ============ 03 域名与 DNS ============ -->
+      <section class="view" id="view-dns">
+        <div class="page-head">
+          <div class="page-eyebrow">03 / Zones &amp; DNS</div>
+          <h1 class="page-title">域名与 DNS</h1>
+          <p class="page-sub">选 Zone 与查看 Cloudflare 记录；Ingress 规则在「隧道」页里按隧道维护。</p>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div class="card-head-txt">
+              <h2 class="card-title">Cloudflare 域名（Zone）</h2>
+              <p class="card-sub">从账号拉取域名，选中的一条作为添加规则时的默认 Zone。</p>
+            </div>
+            <div class="card-acts">
+              <button class="btn btn-primary btn-auto" id="fetchZonesBtn" type="button">获取域名列表</button>
+            </div>
+          </div>
+          <div class="notice" id="zonesNotice" hidden></div>
+          <div id="zonesList"></div>
+          <div class="empty-state" id="zonesEmpty" hidden></div>
         </div>
 
         <div class="card">
@@ -586,6 +586,6 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="/app.js?v=20"></script>
+<script src="/app.js?v=22"></script>
 </body>
 </html>

@@ -70,9 +70,9 @@ CONFIG_PATH = DATA_DIR / "workbench.json"
 DB_PATH = DATA_DIR / "kay-cftunnle.sqlite3"
 SESSION_COOKIE = "kay_cftunnle_session"
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 # 静态资源版本号：改前端后递增，用于破浏览器缓存（需与 index.html 的 ?v= 保持一致）
-STATIC_REV = 20
+STATIC_REV = 22
 START_TIME = time.time()
 SESSION_MAX_AGE = 7 * 24 * 60 * 60
 # 连接器运行超过该秒数视为「稳定运行」，看门狗重试计数归零

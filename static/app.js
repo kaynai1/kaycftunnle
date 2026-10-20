@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT · Copyright (c) 2026 EasonShu */
 /* Kay-cftunnle 面板 · 前端逻辑
-   顶部一级标签路由：overview / tunnels / dns(域名与规则) / connector / settings。
+   顶部一级标签路由：overview / tunnels / dns(域名与 DNS) / connector / settings。
    交互一律在页内完成：新建走 .form-panel，行内展开走 .row-detail（令牌、编辑、删除确认）。
    约定：/api 业务错误一律 HTTP 200 + {ok:false,...}，协议/鉴权错误才用 4xx/5xx。 */
 (function () {
@@ -10,7 +10,7 @@
 
   // 顶部一级标签：route → 标题，同时充当合法路由表
   var TAB_TITLES = {
-    overview: "总览", tunnels: "隧道", dns: "域名与规则",
+    overview: "总览", tunnels: "隧道", dns: "域名与 DNS",
     connector: "连接器", settings: "设置",
   };
 
@@ -205,8 +205,8 @@
       v.classList.toggle("active", v.id === "view-" + route);
     });
     if (route === "overview") { refreshOverview(); loadSystemInfo(); }
-    else if (route === "tunnels") refreshTunnels();
-    else if (route === "dns") { refreshZones(); refreshIngresses(); refreshDnsRecords(); }
+    else if (route === "tunnels") { refreshTunnels(); refreshIngresses(); }
+    else if (route === "dns") { refreshZones(); refreshDnsRecords(); }
     else if (route === "connector") { refreshConnector(); loadSystemSettings(); }
     else if (route === "settings") { loadCfStatus(); loadSystemInfo(); }
   }
@@ -1085,13 +1085,20 @@
   }
 
   function newIngress() {
+    // Zone 与隧道列表要从 Cloudflare 现拉，两三个来回要一两秒，不给反馈会被当成没点上
+    var btn = $("newIngressBtn");
+    var btnText = btn ? btn.textContent : "";
+    function done() { if (btn) { btn.disabled = false; btn.textContent = btnText; } }
+    if (btn) { btn.disabled = true; btn.textContent = "读取 Zone 与隧道…"; }
     ensureZones().then(function (hasZone) {
       if (!hasZone) {
+        done();
         toast("当前账号下没有可用域名，请先到设置页确认 Token 权限");
         return;
       }
       return api("GET", "/tunnels").then(function (t) {
         if (!t.configured || !t.ok || !(t.tunnels || []).length) {
+          done();
           toast("请先创建至少一条 Cloudflare 隧道");
           location.hash = "#/tunnels";
           return;
@@ -1100,6 +1107,7 @@
         $("mIngTunnel").innerHTML = ingressTunnelOptions(t.tunnels, "");
         $("mIngSubdomain").value = "";
         $("mIngService").value = "";
+        done();
         openPanel("ingressForm", "mIngSubdomain");
         $("mIngOk").onclick = function () {
         var zoneSel = $("mIngZone");
@@ -1135,7 +1143,7 @@
           ok.textContent = "创建规则";
         });
         };
-      }).catch(function (err) { toast("获取隧道列表失败：" + err.message); });
+      }).catch(function (err) { done(); toast("获取隧道列表失败：" + err.message); });
     });
   }
 
@@ -1343,7 +1351,7 @@
       location.hash = "#/connector";
       setTimeout(function () { startConnector(); }, 60);
     } else if (action === "ingress") {
-      location.hash = "#/dns";
+      location.hash = "#/tunnels";
       setTimeout(newIngress, 60);
     }
   }
@@ -1382,7 +1390,7 @@
     $("refreshTunnelsBtn").addEventListener("click", refreshTunnels);
     $("tunnelsList").addEventListener("click", onTunnelsClick);
 
-    // 域名与规则页
+    // 域名与 DNS 页
     $("fetchZonesBtn").addEventListener("click", refreshZones);
     $("zonesList").addEventListener("click", onZonesClick);
     $("newIngressBtn").addEventListener("click", newIngress);
