@@ -81,6 +81,9 @@ START_TIME = time.time()
 SESSION_MAX_AGE = 7 * 24 * 60 * 60
 # 连接器运行超过该秒数视为「稳定运行」，看门狗重试计数归零
 STABLE_RUN_SECONDS = 300
+# 开机自动连接的退避表：NAS 重启时 DNS/外网常常比面板晚就绪几十秒到几分钟，
+# 一次失败就放弃等于逼用户每次重启后进面板手点「连接」
+AUTO_CONNECT_DELAYS = (10, 20, 40, 60, 120, 180)
 PASSWORD_ITERATIONS = 260_000
 USERNAME_RE = None  # 单管理员模式，不做注册，M1 不校验用户名格式
 
@@ -128,7 +131,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     # 连接器设置（M4 cloudflared 启动时读取，可提前在设置页保存）
     "connector": {
-        "auto_connect": False,
+        # 开机/重启后自动把隧道连上。NAS 是长期挂机的东西，默认必须自己起来，
+        # 不能指望人每次重启后再进面板点一次「连接」。
+        "auto_connect": True,
         "protocol": "http2",
         "ip_version": "ipv4",
         "default_tunnel_id": "",
@@ -176,6 +181,13 @@ def load_config() -> Dict[str, Any]:
     if not panel_cfg.get("auth_mode_migrated"):
         panel_cfg["no_auth_run"] = True
         panel_cfg["auth_mode_migrated"] = True
+    # 1.7.x 之前 auto_connect 出厂是关的，重启 NAS 后隧道停在「未连接」，
+    # 非得人进面板再点一次。老配置一次性打开；之后用户在设置页关掉就不再覆盖。
+    # 注意：这个标记不能写进 DEFAULT_CONFIG.panel——默认值会跟着深拷贝进来，
+    # 老配置合并后看起来「已迁移过」，迁移就永远不发生了。
+    if not panel_cfg.get("auto_connect_migrated"):
+        cfg.setdefault("connector", {})["auto_connect"] = True
+        panel_cfg["auto_connect_migrated"] = True
     if not cfg["auth"].get("secret"):
         cfg["auth"]["secret"] = secrets.token_hex(32)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -515,7 +527,7 @@ class ConnectorManager:
             return 0
 
     def _resolve_tunnel(self, tunnel_id: str = "") -> Tuple[Optional[str], Optional[str]]:
-        """确定要启动的隧道：参数 > 配置默认 > 第一个可用隧道。"""
+        """确定要启动的隧道：参数 > 配置默认 > 配过访问规则的 > 列表第一条。"""
         if not tunnel_id:
             tunnel_id = (self.cfg.get("connector") or {}).get("default_tunnel_id", "")
         cf = self.cfg.get("cloudflare") or {}
@@ -533,8 +545,44 @@ class ConnectorManager:
             for t in tunnels:
                 if t["id"] == tunnel_id:
                     return t["id"], None
-        # 否则取第一个
-        return tunnels[0]["id"], None
+        # 还没记下默认隧道时，挑一条本机配过访问规则的：账号里通常留着几条没用的空隧道，
+        # 连错那条的表现是「面板说已连接、域名却打不开」，比不连更难排查。
+        with_rules = self._tunnel_with_rules([t["id"] for t in tunnels])
+        return with_rules or tunnels[0]["id"], None
+
+    @staticmethod
+    def _tunnel_with_rules(tunnel_ids: List[str]) -> str:
+        """候选隧道里取「本机记录过访问规则」的那条，多条则取最近更新过的。"""
+        if not tunnel_ids:
+            return ""
+        try:
+            placeholders = ",".join("?" * len(tunnel_ids))
+            with db_connect() as conn:
+                row = conn.execute(
+                    "SELECT tunnel_id FROM ingress_rules WHERE tunnel_id IN (%s) "
+                    "GROUP BY tunnel_id ORDER BY MAX(updated_at) DESC LIMIT 1" % placeholders,
+                    list(tunnel_ids),
+                ).fetchone()
+            return row["tunnel_id"] if row else ""
+        except Exception:  # pragma: no cover - 库里没记录时退回列表第一条
+            return ""
+
+    def _remember_default_tunnel(self, tunnel_id: str) -> None:
+        """把这次真正连上的隧道记成默认。
+
+        账号里往往不止一条隧道（买家会留着试错的空隧道），不记下来下次开机
+        _resolve_tunnel 只能取列表第一条，很可能连到一条没有规则的隧道上，
+        表现就是「面板说已连接，域名却打不开」。
+        """
+        conn_cfg = self.cfg.setdefault("connector", {})
+        if not tunnel_id or conn_cfg.get("default_tunnel_id") == tunnel_id:
+            return
+        conn_cfg["default_tunnel_id"] = tunnel_id
+        try:
+            with _CFG_LOCK:
+                save_config(self.cfg)
+        except Exception as exc:  # pragma: no cover - 记不住不影响本次连接
+            print("[!] 默认隧道保存失败：%s" % exc, file=sys.stderr)
 
     def start(self, tunnel_id: str = "", auto: bool = False) -> Dict[str, Any]:
         """启动 cloudflared。auto=True 表示由看门狗/自动连接拉起，非用户手动。"""
@@ -693,6 +741,7 @@ class ConnectorManager:
                 # 自动拉起成功：清掉上次的退出记录与「已放弃」标记，
                 # 否则界面会一直显示 give_up=True，与实际情况矛盾
                 self._exit_info.pop("give_up", None)
+            self._remember_default_tunnel(resolved)
             self._write_pid(self.proc.pid)
             ip_label = {"4": "IPv4", "6": "IPv6"}.get(edge_ip, "IPv4/IPv6 自动")
             add_log("connector", "启动隧道 %s（%s / %s）%s"
@@ -1013,19 +1062,49 @@ class ConnectorManager:
             }
 
     def auto_connect(self) -> None:
-        """服务启动时，若配置 auto_connect 则尝试启动。"""
+        """服务启动时自动把隧道连上。
+
+        开机这一趟网络往往还没就绪（DNS 都没起来，Cloudflare API 直接超时），
+        一次失败就放弃等于逼用户每次重启后手动点「连接」，所以按退避多试几轮。
+        """
         conn_cfg = self.cfg.get("connector", {})
         if not conn_cfg.get("auto_connect"):
             return
         if not self.find_binary():
             print("[!] auto_connect 已开启，但未找到 cloudflared 二进制", file=sys.stderr)
             return
-        result = self.start(auto=True)
-        if result.get("ok"):
-            print("[*] 自动启动 cloudflared 成功，PID %s" % result.get("pid"), flush=True)
-        else:
-            print("[!] 自动启动 cloudflared 失败：%s" % result.get("error"), file=sys.stderr)
-            add_connector_event("start_fail", "服务启动时自动连接失败：" + str(result.get("error")))
+        if self.license_mgr is not None and not self.license_mgr.is_valid():
+            print("[*] 面板尚未激活，跳过开机自动连接", flush=True)
+            return
+        if not (self.cfg.get("cloudflare") or {}).get("api_token"):
+            print("[*] 尚未配置 Cloudflare 凭据，跳过开机自动连接", flush=True)
+            return
+
+        delays = AUTO_CONNECT_DELAYS
+        result: Dict[str, Any] = {}
+        for attempt, delay in enumerate(delays, 1):
+            result = self.start(auto=True)
+            if result.get("ok"):
+                print("[*] 自动启动 cloudflared 成功（第 %d 次尝试），PID %s"
+                      % (attempt, result.get("pid")), flush=True)
+                return
+            error = str(result.get("error") or "")
+            if "已在运行中" in error:
+                return
+            if attempt < len(delays):
+                print("[!] 自动启动失败（第 %d 次）：%s，%d 秒后重试"
+                      % (attempt, error, delay), file=sys.stderr, flush=True)
+                # 等待期间用户可能点了「停止」，不要跟他抢
+                waited = 0.0
+                while waited < delay:
+                    if self._stop_by_user:
+                        return
+                    nap = min(1.0, delay - waited)
+                    time.sleep(nap)
+                    waited += nap
+        add_log("connector", "开机自动连接未成功：" + str(result.get("error")), "error")
+        print("[!] 自动启动 cloudflared 失败：%s" % result.get("error"), file=sys.stderr)
+        add_connector_event("start_fail", "服务启动时自动连接失败：" + str(result.get("error")))
 
 
 # ------------------------------------------------------------------ 数据库
