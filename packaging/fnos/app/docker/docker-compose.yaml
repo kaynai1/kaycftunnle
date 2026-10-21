@@ -19,7 +19,10 @@ services:
   kaycftunnle:
     image: __KAY_CFTUNNLE_IMAGE__
     container_name: kaycftunnle
-    restart: unless-stopped
+    # always（不是 unless-stopped）：开机时由 Docker 自己把面板拉起来。
+    # 飞牛的应用自启有时跑在 dockerd 之前，那一次启动会失败而且不重试，
+    # 用 always 就不必赌它成功；应用中心里点「停止」仍然会停，只是重启后自启。
+    restart: always
     # 容器内需要拉起 cloudflared 子进程并管理隧道，init 负责收信号与回收僵尸进程
     init: true
     pull_policy: __KAY_CFTUNNLE_PULL_POLICY__
@@ -28,6 +31,11 @@ services:
       - PYTHONUNBUFFERED=1
       - DASHBOARD_HOST=0.0.0.0
       - DASHBOARD_PORT=8567
+      # 授权服务地址（卖家自己的 Worker 域名）：打包时用 --license-url 写死，买家就不用填
+      # 只用离线授权码（KAYO-…）且从没填过地址的买家，面板不会报到，也就无法远程吊销
+__KAY_LICENSE_ENV__
+      # 断网离线宽限天数，默认 7
+      # - KAY_OFFLINE_GRACE_DAYS=7
     ports:
       - "${KAY_CFTUNNLE_PORT:-8567}:8567"
     volumes:

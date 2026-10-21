@@ -1,0 +1,177 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: MIT · Copyright (c) 2026 EasonShu -->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f7f6f3" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#171410" media="(prefers-color-scheme: dark)">
+  <title>激活设备 · Kay-cftunnle</title>
+  <meta name="robots" content="noindex, nofollow, noarchive, nosnippet">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23FF6B35'/%3E%3Cpath d='M6 27V15a10 10 0 0 1 20 0v12h-5V15a5 5 0 0 0-10 0v12H6Z' fill='%231C1917'/%3E%3C/svg%3E">
+  <script src="/theme.js?v=45"></script>
+  <link rel="stylesheet" href="/theme.css?v=45">
+  <link rel="stylesheet" href="/styles.css?v=45">
+  <link rel="stylesheet" href="/activate.css?v=45">
+</head>
+<body class="activate-body">
+
+<svg class="svg-sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-tunnel" viewBox="0 0 24 24"><path d="M4 21V11.5a8 8 0 0 1 16 0V21h-4.6v-9.5a3.4 3.4 0 0 0-6.8 0V21H4Z"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="8" r="4.2"/><path d="m11 11 9 9"/><path d="m16.5 16.5 2-2"/><path d="m19 19 2-2"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m4.5 12.5 5 5L19.5 6.5"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14-4.5L4 9"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14 4.5l2-2.5"/><path d="M20 20v-5h-5"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 20 6v5.5c0 5-3.4 8.4-8 9.5-4.6-1.1-8-4.5-8-9.5V6l8-3Z"/><path d="m8.5 12 2.4 2.4 4.6-4.8"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h15"/><path d="m13 6 6 6-6 6"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3.5 21 20H3L12 3.5Z"/><path d="M12 9v5"/><path d="M12 17h.01"/></symbol>
+  <symbol id="i-device" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/><path d="M12 16v4"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+</svg>
+
+<button class="activate-theme" id="themeToggle" type="button" aria-label="切换明暗主题">
+  <svg class="ico" aria-hidden="true"><use href="#i-sun" data-theme-icon="light"></use></svg>
+  <svg class="ico" aria-hidden="true" hidden><use href="#i-moon"></use></svg>
+</button>
+
+<main class="activate-screen">
+  <section class="activate-card" aria-labelledby="activateTitle">
+
+    <aside class="activate-aside">
+      <div class="aside-glow" aria-hidden="true"></div>
+      <div class="activate-brand">
+        <span class="activate-mark"><svg class="ico ico-fill" aria-hidden="true"><use href="#i-tunnel"></use></svg></span>
+        <span class="activate-wordmark">Kay-cftunnle</span>
+        <span class="activate-edition">DEVICE LICENSE</span>
+      </div>
+
+      <div class="aside-copy">
+        <p class="aside-eyebrow"><span>01</span> / 设备通行证</p>
+        <h1 class="aside-title" id="activateTitle">一台 NAS，<br>一张通行证。</h1>
+        <p class="aside-desc">授权与当前设备绑定。在线卡密即买即用、不用先报机器码，离线授权码断网也能激活；换设备时联系卖家解绑或重签。</p>
+      </div>
+
+      <div class="keycard" aria-label="本机机器码">
+        <div class="keycard-top">
+          <span class="keycard-label">MACHINE ID</span>
+          <button class="keycard-copy" id="copyMachine" type="button" title="复制机器码">
+            <svg class="ico" aria-hidden="true"><use href="#i-copy"></use></svg>
+            <span>复制</span>
+          </button>
+        </div>
+        <div class="keycard-code" id="machineCode">读取中…</div>
+        <div class="keycard-foot">
+          <span class="keycard-dot" id="statusDot"></span>
+          <span id="asideStatus">正在读取授权状态</span>
+          <span class="keycard-pin">v1.7.0</span>
+        </div>
+      </div>
+
+      <ul class="aside-facts">
+        <li><svg class="ico" aria-hidden="true"><use href="#i-shield"></use></svg>一码一机 · 签名绑定</li>
+        <li><svg class="ico" aria-hidden="true"><use href="#i-clock"></use></svg>离线可激活</li>
+        <li><svg class="ico" aria-hidden="true"><use href="#i-device"></use></svg>换机重签发</li>
+      </ul>
+    </aside>
+
+    <div class="activate-main">
+      <header class="activate-head">
+        <p class="activate-eyebrow"><span>ACTIVATION</span></p>
+        <h2 class="activate-heading">激活这台设备</h2>
+        <p class="activate-lead">输入购买时收到的卡密，或粘贴卖家为本机签发的离线授权码。激活成功后，面板与隧道连接器才会开始工作。</p>
+      </header>
+
+      <div class="activate-notice" id="activateNotice" hidden>
+        <svg class="ico" aria-hidden="true"><use href="#i-alert"></use></svg>
+        <div class="notice-body">
+          <strong id="noticeTitle">授权需要处理</strong>
+          <p id="noticeText"></p>
+        </div>
+        <button class="btn btn-ghost btn-sm" id="verifyBtn" type="button">立即校验</button>
+      </div>
+
+      <div class="activate-modes" role="tablist" aria-label="激活方式">
+        <button class="mode-tab is-active" id="tabOnline" type="button" role="tab"
+                aria-selected="true" aria-controls="onlinePane">在线卡密</button>
+        <button class="mode-tab" id="tabOffline" type="button" role="tab"
+                aria-selected="false" aria-controls="offlinePane">离线授权码</button>
+      </div>
+
+      <form id="activateForm" autocomplete="off" novalidate>
+        <div id="onlinePane">
+          <div class="field license-field">
+            <div class="license-label-row">
+              <label class="field-label" for="licenseCode">卡密</label>
+              <span class="license-format">KAY-XXXX-XXXX-XXXX</span>
+            </div>
+            <div class="license-input-wrap">
+              <svg class="ico" aria-hidden="true"><use href="#i-key"></use></svg>
+              <input class="field-input license-input" id="licenseCode" type="text"
+                     placeholder="KAY-XXXX-XXXX-XXXX" spellcheck="false" autocapitalize="characters"
+                     inputmode="text" maxlength="24" aria-describedby="licenseHint">
+            </div>
+            <p class="form-hint" id="licenseHint">不区分大小写，粘贴后会自动整理格式。</p>
+          </div>
+
+          <details class="activate-advanced" id="serverDetails">
+            <summary>授权服务地址<span id="serverState">必填</span></summary>
+            <div class="advanced-body">
+              <label class="field-label" for="serverUrl">Cloudflare Worker 地址</label>
+              <input class="field-input" id="serverUrl" type="url" spellcheck="false"
+                     placeholder="https://kay-license.example.workers.dev">
+              <p class="form-hint">只需填写一次，激活后保存在本机。公网地址必须使用 https://。</p>
+            </div>
+          </details>
+
+          <button class="activate-swap" id="changeServerBtn" type="button" hidden>地址不对？更换授权服务地址</button>
+        </div>
+
+        <div id="offlinePane" hidden>
+          <div class="field license-field">
+            <div class="license-label-row">
+              <label class="field-label" for="offlineCode">离线授权码</label>
+              <span class="license-format">KAYO-…</span>
+            </div>
+            <textarea class="field-input offline-input" id="offlineCode" rows="5" spellcheck="false"
+                      autocapitalize="characters" placeholder="KAYO-XXXXX-XXXXX-XXXXX-…"
+                      aria-describedby="offlineHint"></textarea>
+            <p class="form-hint" id="offlineHint">卖家发来的授权码整段粘贴到这里即可，无需联网。一对一签发的码要先把左侧机器码发给卖家；批量码激活时自动绑定本机。</p>
+          </div>
+        </div>
+
+        <div class="form-error" id="activateError" role="alert"></div>
+
+        <button class="btn btn-primary activate-submit" id="activateBtn" type="submit">
+          <span id="activateBtnText">激活这台设备</span>
+          <svg class="ico" aria-hidden="true"><use href="#i-arrow"></use></svg>
+        </button>
+      </form>
+
+      <div class="activate-success" id="successPanel" hidden>
+        <span class="success-mark"><svg class="ico" aria-hidden="true"><use href="#i-check"></use></svg></span>
+        <div>
+          <strong>激活成功</strong>
+          <p>授权已写入本机，正在进入面板…</p>
+        </div>
+      </div>
+
+      <ul class="activate-trust">
+        <li><svg class="ico" aria-hidden="true"><use href="#i-shield"></use></svg><span><b>一码一机</b>激活后自动绑定这台设备，码外传给别人用不了</span></li>
+        <li><svg class="ico" aria-hidden="true"><use href="#i-clock"></use></svg><span><b>断网可用</b>离线授权不依赖网络，纯内网也能激活</span></li>
+        <li><svg class="ico" aria-hidden="true"><use href="#i-device"></use></svg><span><b>支持换机</b>让卖家解绑，新设备用同一张码重新激活</span></li>
+      </ul>
+
+      <footer class="activate-foot">
+        <span>机器码由设备指纹哈希生成，不包含隐私信息。</span>
+        <span class="foot-brand">Kay-cftunnle · Cloudflare Tunnel 自托管面板</span>
+      </footer>
+    </div>
+  </section>
+</main>
+
+<script src="/activate.js?v=45"></script>
+</body>
+</html>

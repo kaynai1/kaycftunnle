@@ -1,0 +1,17 @@
+name = "kay-license"
+main = "src/worker.js"
+compatibility_date = "2025-09-01"
+workers_dev = true
+
+# 部署步骤（详见 README.md）：
+# 1) npx wrangler kv namespace create LICENSES   → 把返回的 id 填到下面（不是 name）
+# 2) node tools/keygen.mjs                        → 生成私钥密文 tools/offline-key.json
+# 3) npx wrangler secret put KEY_BLOB < tools/offline-key.json   → 私钥密文（离线签发用）
+# 4) npx wrangler secret put ISSUE_TOKEN                         → 发卡台令牌（/issue、签发、离线台账）
+# 5) npx wrangler secret put ADMIN_TOKEN                         → 在线卡密管理令牌
+# 6) npx wrangler deploy
+# 7) 打开 https://<worker 域名>/issue，用口令解锁私钥，页面会回显 OFFLINE_PUBLIC_KEY，
+#    把它写进面板 license.py 的 OFFLINE_PUBLIC_KEY 后重新打包镜像。
+[[kv_namespaces]]
+binding = "LICENSES"
+id = "b93c0110b444420daeb951456a8f818f"

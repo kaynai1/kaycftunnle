@@ -10,6 +10,9 @@
 #   sh build-fpk.sh --no-image                 # 完全不处理镜像，只打应用骨架（仅调试）
 #   sh build-fpk.sh --src-overlay --image ghcr.io/kaynai1/kaycftunnle:latest
 #                                              # 测试包：基础镜像 + 当前源码绑定覆盖，无需重建镜像
+#   sh build-fpk.sh ... --license-url https://9ky.us.ci
+#                                              # 把卖家授权服务地址打进包里：
+#                                              # 买家激活页无需手填，且离线码激活当场就能报到绑定设备
 #
 # 产物：dist/kaycftunnle-<版本>.fpk
 #
@@ -45,6 +48,7 @@ IMAGE_NAME="kaycftunnle:latest"
 IMAGE_TAR=""
 EMBED_IMAGE="auto"
 SRC_OVERLAY="no"
+LICENSE_URL=""
 
 info() { printf '\033[32m[*]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[!]\033[0m %s\n' "$*" >&2; }
@@ -58,6 +62,7 @@ while [ $# -gt 0 ]; do
     --no-embed) EMBED_IMAGE="no"; shift ;;
     --no-image) EMBED_IMAGE="skip"; shift ;;
     --src-overlay) SRC_OVERLAY="yes"; shift ;;
+    --license-url) LICENSE_URL="$2"; shift 2 ;;
     -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     *) err "未知参数: $1"; exit 1 ;;
   esac
@@ -177,6 +182,17 @@ grep -q '__KAY_CFTUNNLE_IMAGE__' "$COMPOSE_FILE" \
 sed -i "s|__KAY_CFTUNNLE_IMAGE__|${IMAGE_NAME}|g; s|__KAY_CFTUNNLE_PULL_POLICY__|${PULL_POLICY}|g" "$COMPOSE_FILE"
 info "镜像拉取策略: $PULL_POLICY_DESC"
 
+# 授权服务地址：卖家自己打包时写死，买家就不用手填，离线批量码也能在激活当场完成设备绑定
+grep -q '__KAY_LICENSE_ENV__' "$COMPOSE_FILE" \
+  || { err "compose 模板缺少 __KAY_LICENSE_ENV__ 占位符"; exit 1; }
+if [ -n "$LICENSE_URL" ]; then
+  sed -i "s|__KAY_LICENSE_ENV__|      - KAY_LICENSE_URL=${LICENSE_URL}|g" "$COMPOSE_FILE"
+  info "授权服务地址已打进包：$LICENSE_URL"
+else
+  sed -i "s|__KAY_LICENSE_ENV__|      # 未预置：买家在激活页展开「授权服务地址」自己填，或用 --license-url 打包时写死|g" "$COMPOSE_FILE"
+  warn "未指定 --license-url，买家需要在激活页手填授权服务地址（在线卡密必须填，离线授权码可留空）"
+fi
+
 # 未内嵌镜像时，往包里塞一份安装说明，用户解包就能看到该干什么
 if [ "$EMBED_IMAGE" != "yes" ]; then
   case "$IMAGE_NAME" in
@@ -288,8 +304,10 @@ if [ "$SRC_OVERLAY" = "yes" ]; then
   mkdir -p "$BUILD_DIR/app/docker/appsrc/static"
   cp -f "$PROJECT_DIR/server.py" "$BUILD_DIR/app/docker/appsrc/server.py"
   cp -f "$PROJECT_DIR/cf.py" "$BUILD_DIR/app/docker/appsrc/cf.py"
+  cp -f "$PROJECT_DIR/license.py" "$BUILD_DIR/app/docker/appsrc/license.py"
+  cp -f "$PROJECT_DIR/license_ed25519.py" "$BUILD_DIR/app/docker/appsrc/license_ed25519.py"
   (cd "$PROJECT_DIR/static" && tar -cf - .) | (cd "$BUILD_DIR/app/docker/appsrc/static" && tar -xf -)
-  for f in appsrc/server.py appsrc/cf.py appsrc/static/index.html appsrc/static/app.js; do
+  for f in appsrc/server.py appsrc/cf.py appsrc/license.py appsrc/license_ed25519.py appsrc/static/index.html appsrc/static/app.js appsrc/static/activate.html; do
     [ -f "$BUILD_DIR/app/docker/$f" ] || { err "源码覆盖缺少 $f"; exit 1; }
   done
   COMPOSE_FILE="$BUILD_DIR/app/docker/docker-compose.yaml"
@@ -306,6 +324,18 @@ if [ "$SRC_OVERLAY" = "yes" ]; then
       print "      - type: bind"
       print "        source: ./appsrc/cf.py"
       print "        target: /app/cf.py"
+      print "        read_only: true"
+      print "        bind:"
+      print "          create_host_path: false"
+      print "      - type: bind"
+      print "        source: ./appsrc/license.py"
+      print "        target: /app/license.py"
+      print "        read_only: true"
+      print "        bind:"
+      print "          create_host_path: false"
+      print "      - type: bind"
+      print "        source: ./appsrc/license_ed25519.py"
+      print "        target: /app/license_ed25519.py"
       print "        read_only: true"
       print "        bind:"
       print "          create_host_path: false"

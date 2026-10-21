@@ -1,0 +1,16 @@
+{
+  "name": "kay-license-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Kay-cftunnle 在线卡密授权服务（Cloudflare Workers + KV）",
+  "scripts": {
+    "test": "node --test test/",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "undici": "^7.24.8",
+    "wrangler": "^4.0.0"
+  }
+}

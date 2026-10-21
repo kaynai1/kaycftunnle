@@ -63,6 +63,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
 from cf import CloudflareClient, CloudflareError
+from license import LicenseManager, mask_code
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
@@ -73,9 +74,9 @@ CONFIG_PATH = DATA_DIR / "workbench.json"
 DB_PATH = DATA_DIR / "kay-cftunnle.sqlite3"
 SESSION_COOKIE = "kay_cftunnle_session"
 
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.7.0"
 # 静态资源版本号：改前端后递增，用于破浏览器缓存（需与 index.html 的 ?v= 保持一致）
-STATIC_REV = 41
+STATIC_REV = 45
 START_TIME = time.time()
 SESSION_MAX_AGE = 7 * 24 * 60 * 60
 # 连接器运行超过该秒数视为「稳定运行」，看门狗重试计数归零
@@ -274,6 +275,21 @@ def mask_token(token: str) -> str:
     return token[:6] + "…" + token[-4:]
 
 
+def redact_license(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """授权信息下发给浏览器前的脱敏：地址与完整卡密/离线授权码都不出面板，只给 server_configured / code_masked。"""
+    if not isinstance(payload, dict):
+        return payload
+    for key in ("license", "status"):
+        inner = payload.get(key)
+        if isinstance(inner, dict):
+            redact_license(inner)
+    if "server_url" in payload:
+        payload["server_configured"] = bool(payload.pop("server_url"))
+    for key in ("code", "offline_code", "license_text"):
+        payload.pop(key, None)
+    return payload
+
+
 # 配置写锁：HTTP 多线程下保护 workbench.json 读写
 _CFG_LOCK = threading.Lock()
 
@@ -424,6 +440,7 @@ class ConnectorManager:
         self._watchdog_thread: Optional[threading.Thread] = None
         self._watchdog_interval = 5.0  # 秒
         self._watchdog_stop = threading.Event()
+        self.license_mgr: Optional[LicenseManager] = None
 
     def _ensure_runtime_dir(self) -> None:
         RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
@@ -521,6 +538,8 @@ class ConnectorManager:
 
     def start(self, tunnel_id: str = "", auto: bool = False) -> Dict[str, Any]:
         """启动 cloudflared。auto=True 表示由看门狗/自动连接拉起，非用户手动。"""
+        if self.license_mgr is not None and not self.license_mgr.is_valid():
+            return {"ok": False, "error": "面板尚未激活或授权已失效，无法启动连接器"}
         with self.lock:
             if self.proc and self.proc.poll() is None:
                 return {"ok": False, "error": "连接器已在运行中"}
@@ -1176,9 +1195,10 @@ CONTENT_TYPES = {
 
 
 class PanelHandler(BaseHTTPRequestHandler):
-    server_version = "Kay-cftunnle/1.0"
+    server_version = "Kay-cftunnle/1.6"
     protocol_version = "HTTP/1.1"
     cfg: Dict[str, Any] = {}
+    license_mgr: Optional[LicenseManager] = None
     _head_only = False
 
     # ------------------------------------------------------------ 基础工具
@@ -1203,6 +1223,13 @@ class PanelHandler(BaseHTTPRequestHandler):
         if log:
             add_log("api", "[%d] %s" % (status, message), "warn")
         self._send_json({"ok": False, "error": message}, status)
+
+    def _redirect(self, location: str) -> None:
+        self.send_response(HTTPStatus.FOUND)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
 
     def _read_body(self) -> Dict[str, Any]:
         # _dispatch 已经按 Content-Length 读空请求体，避免 keep-alive 连接里
@@ -1288,6 +1315,31 @@ class PanelHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True, "service": "kay-cftunnle", "time": int(time.time())})
             return
 
+        # 授权接口在门禁之外：未激活时浏览器只能访问激活页和这几个接口
+        if route == "/license/status" and method == "GET":
+            self._api_license_status()
+            return
+        if route == "/license/activate" and method == "POST":
+            self._api_license_activate()
+            return
+        if route == "/license/verify" and method == "POST":
+            self._api_license_verify()
+            return
+        if route == "/license/server" and method == "POST":
+            self._api_license_server()
+            return
+
+        if self.license_mgr is not None and not self.license_mgr.is_valid():
+            lic = redact_license(self.license_mgr.status())
+            self._send_json({
+                "ok": False,
+                "code": "unlicensed",
+                "error": lic["message"],
+                "license": lic,
+                "activate_url": "/activate.html",
+            }, 403)
+            return
+
         if route == "/auth/login" and method == "POST":
             self._api_login()
             return
@@ -1310,6 +1362,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                 "user": {"username": user["username"], "role": user["role"]},
                 "no_auth_run": bool(self.cfg["panel"].get("no_auth_run")),
                 "cloudflare_configured": bool(self.cfg["cloudflare"].get("api_token")),
+                "license": redact_license(self.license_mgr.status()) if self.license_mgr else None,
             })
             return
 
@@ -1376,6 +1429,69 @@ class PanelHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if not self._head_only:
             self.wfile.write(body)
+
+    # ------------------------------------------------------------ 授权激活
+
+    def _api_license_status(self) -> None:
+        if self.license_mgr is None:
+            self._send_error_json(503, "授权模块未初始化")
+            return
+        self._send_json(redact_license(self.license_mgr.status()))
+
+    def _api_license_activate(self) -> None:
+        if self.license_mgr is None:
+            self._send_error_json(503, "授权模块未初始化")
+            return
+        body = self._read_body()
+        raw = str(body.get("code") or body.get("license_key") or "").strip()
+        server_url = str(body.get("server_url") or "").strip()
+        result = self.license_mgr.activate_any(raw, server_url or None)
+        if result.get("ok"):
+            status = self.license_mgr.status()
+            label = status.get("code_masked") or status.get("machine_code", "")
+            add_log("license", "设备授权激活成功（%s · %s）"
+                    % (label, status.get("machine_code", "")))
+            print("[*] 授权激活成功：%s（%s）" % (label, status.get("mode")), flush=True)
+            # 激活成功后按配置自动拉起连接器（Cloudflare API 可能较慢，放后台）
+            threading.Thread(target=self._connect_after_activation, daemon=True).start()
+        self._send_json(redact_license(result))
+
+    def _connect_after_activation(self) -> None:
+        conn_cfg = self.cfg.get("connector", {}) or {}
+        if not conn_cfg.get("auto_connect"):
+            return
+        if CONNECTOR.status().get("running"):
+            return
+        result = CONNECTOR.start(auto=True)
+        if result.get("ok"):
+            print("[*] 激活后自动启动 cloudflared 成功，PID %s" % result.get("pid"), flush=True)
+        else:
+            print("[!] 激活后自动启动 cloudflared 失败：%s" % result.get("error"), file=sys.stderr)
+
+    def _api_license_verify(self) -> None:
+        if self.license_mgr is None:
+            self._send_error_json(503, "授权模块未初始化")
+            return
+        result = self.license_mgr.verify_now(force=True)
+        if result.get("ok"):
+            add_log("license", str(result.get("message") or "校验通过"))
+        elif result.get("reason") not in ("network", "throttled", "busy"):
+            add_log("license", "在线校验失败：%s" % result.get("error"), "warn")
+        self._send_json(redact_license(result))
+
+    def _api_license_server(self) -> None:
+        if self.license_mgr is None:
+            self._send_error_json(503, "授权模块未初始化")
+            return
+        body = self._read_body()
+        try:
+            result = self.license_mgr.set_server_url(str(body.get("server_url") or ""))
+        except ValueError as exc:
+            self._send_json({"ok": False, "reason": "invalid_server", "error": str(exc)})
+            return
+        if result.get("ok"):
+            add_log("license", "授权服务地址已保存")
+        self._send_json(result)
 
     # ------------------------------------------------------------ 面板 API（M2）
 
@@ -2385,6 +2501,14 @@ class PanelHandler(BaseHTTPRequestHandler):
     def _serve_static(self, path: str, head_only: bool) -> None:
         if path in ("/", ""):
             path = "/index.html"
+        if self.license_mgr is not None:
+            licensed = self.license_mgr.is_valid()
+            if path in ("/index.html", "/index.htm") and not licensed:
+                self._redirect("/activate.html")
+                return
+            if path == "/activate.html" and licensed:
+                self._redirect("/")
+                return
         # 防目录穿越：规整化后必须以 STATIC_DIR 开头
         target = (STATIC_DIR / path.lstrip("/")).resolve()
         try:
@@ -2454,14 +2578,47 @@ def main() -> None:
         print(json.dumps(self_check(cfg), ensure_ascii=False, indent=2))
         return
 
-    PanelHandler.cfg = cfg
+    try:
+        grace_days = int(os.environ.get("KAY_OFFLINE_GRACE_DAYS", "7") or 7)
+    except ValueError:
+        grace_days = 7
 
-    # M4：若开启自动连接，尝试在 HTTP 服务启动前拉起 cloudflared
-    CONNECTOR.auto_connect()
+    def _on_license_locked(reason: str, message: str) -> None:
+        print("[!] 授权失效（%s）：%s" % (reason, message), file=sys.stderr, flush=True)
+        add_log("license", "授权失效：%s（%s）" % (message, reason), "error")
+        add_connector_event("license_lock", "授权失效：%s（%s）" % (message, reason))
+        if CONNECTOR.status().get("running"):
+            CONNECTOR.stop(by_user=True)
+            add_log("connector", "授权失效，已停止连接器", "error")
+            add_connector_event("stop", "授权失效，连接器已停止")
+
+    license_mgr = LicenseManager(
+        DATA_DIR,
+        default_server_url=os.environ.get("KAY_LICENSE_URL", ""),
+        grace_days=grace_days,
+        on_locked=_on_license_locked,
+    )
+    PanelHandler.cfg = cfg
+    PanelHandler.license_mgr = license_mgr
+    CONNECTOR.license_mgr = license_mgr
+    license_mgr.start_background()
+
+    lic_status = license_mgr.status()
+    print("[*] 机器码: %s" % lic_status["machine_code"], flush=True)
+    if lic_status["valid"]:
+        print("[*] 授权状态: %s（%s）" % (lic_status["state"], lic_status.get("code_masked") or "-"),
+              flush=True)
+    else:
+        print("[!] 面板未激活或授权已失效：%s" % lic_status["message"], flush=True)
+        print("[*] 打开 http://<NAS地址>:<端口>/ 进入激活页", flush=True)
+
     # 看门狗：进程意外退出后自动拉起，NAS 长期挂机的稳定性保障
     CONNECTOR.start_watchdog()
 
+    # 先绑端口，再联网。auto_connect 要调 Cloudflare API（单次 15s 超时、可能好几步），
+    # 开机时网络还没就绪会把它拖到几十秒，飞牛的应用端口检测会因此判「启动失败」。
     server = ThreadingHTTPServer((args.host, args.port), PanelHandler)
+    threading.Thread(target=CONNECTOR.auto_connect, name="auto-connect", daemon=True).start()
     print(f"[*] Kay-cftunnle 已启动: http://{args.host}:{args.port}", flush=True)
     print(f"[*] 配置: {CONFIG_PATH}", flush=True)
     if cfg["panel"].get("no_auth_run"):

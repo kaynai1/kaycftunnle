@@ -54,6 +54,10 @@
       if (res.status === 204) return null;
       return res.json().catch(function () { return null; }).then(function (data) {
         if (!res.ok) {
+          // 激活失效/被吊销：服务端已锁定，直接回激活页，避免在面板里反复报错
+          if (res.status === 403 && data && data.code === "unlicensed") {
+            window.location.replace("/activate.html");
+          }
           var msg = (data && data.error) || ("请求失败 (" + res.status + ")");
           throw new Error(msg);
         }
@@ -244,7 +248,7 @@
     if (route === "overview") { refreshOverview(); loadCfStatus(); refreshTunnels(); refreshIngresses(); }
     else if (route === "dns") { refreshZones(); refreshDnsRecords(); }
     else if (route === "connector") { refreshConnector(); loadSystemSettings(); }
-    else if (route === "settings") { loadSystemInfo(); loadSystemSettings(); refreshLogs(); }
+    else if (route === "settings") { loadSystemInfo(); loadSystemSettings(); loadLicenseStatus(); refreshLogs(); }
   }
   function enterPanel() {
     panelEntered = true;
@@ -936,6 +940,125 @@
       if (cur) cur.innerHTML = tunnelText;
     }).catch(function () { /* 保持默认占位符 */ });
   }
+  var licenseStatus = null;
+
+  function formatExpiry(ts) {
+    if (!ts) return "永久有效";
+    var d = new Date(ts * 1000);
+    var p = function (n) { return (n < 10 ? "0" : "") + n; };
+    var day = d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+    var days = Math.ceil((ts - Math.floor(Date.now() / 1000)) / 86400);
+    if (days <= 0) return day + "（已到期）";
+    return days <= 60 ? day + "（剩余 " + days + " 天）" : day;
+  }
+
+  function licenseVerifyText() {
+    return licenseStatus && licenseStatus.mode === "offline" ? "上报授权" : "立即校验";
+  }
+
+  function renderLicenseStatus(s) {
+    if (!s) return;
+    licenseStatus = s;
+    var offline = s.mode === "offline";
+    var badge = $("licenseBadge");
+    if (!badge) return;
+    var badgeMap = {
+      active: ["badge-ok", "已授权"],
+      grace: ["badge-warn", "离线宽限"],
+      revoked: ["badge-bad", "已吊销"],
+      expired: [offline ? "badge-bad" : "badge-warn", offline ? "已到期" : "宽限已过"],
+      invalid: ["badge-warn", "需处理"],
+      pending: ["badge-muted", "校验中"],
+      unactivated: ["badge-muted", "未激活"]
+    };
+    var meta = badgeMap[s.state] || ["badge-muted", "未知"];
+    badge.className = "badge " + meta[0];
+    badge.textContent = meta[1];
+    $("licenseState").textContent = s.message || "–";
+    $("licenseMode").textContent = offline ? "离线授权码（本地验签）" : "在线卡密";
+    $("licenseCode").textContent = s.code_masked || "–";
+    $("licenseMachine").textContent = s.machine_code || "–";
+    $("licenseSerial").textContent = offline ? (s.serial ? "#" + s.serial : "–") : "–";
+    $("licenseExpires").textContent = offline ? formatExpiry(s.expires_at) : "长期有效";
+    $("licenseActivatedAt").textContent = formatClock(offline ? (s.bound_at || s.activated_at) : s.activated_at);
+    $("licenseLastVerified").textContent = offline
+      ? (s.last_verified_at ? formatClock(s.last_verified_at) + "（本机验签）" : "–")
+      : formatClock(s.last_verified_at);
+    $("licenseServer").textContent = s.server_configured ? "已配置（地址不在页面展示）" : "未配置";
+
+    var hint = $("licenseHint");
+    if (offline) {
+      if (s.state === "revoked") {
+        hint.textContent = "这份离线授权已被卖家吊销，面板已锁定。请联系卖家重新签发一份授权码。";
+      } else if (s.state === "expired") {
+        hint.textContent = "离线授权已到期。把机器码发给卖家续签一份，再回到激活页粘贴新的授权码。";
+      } else if (s.server_configured) {
+        hint.textContent = "离线授权在本机验签生效，每 6 小时向授权服务报到一次；报到失败不影响使用，被卖家吊销后会立即锁定。";
+      } else {
+        hint.textContent = "离线授权在本机验签生效，无需联网即可使用。当前未配置授权服务，卖家无法远程吊销，到期后需重新签发。";
+      }
+    } else if (s.last_error) {
+      hint.textContent = "最近一次校验失败：" + s.last_error +
+        (s.state === "grace" ? "；当前处于离线宽限，剩余约 " + Math.ceil((s.grace_left_seconds || 0) / 86400) + " 天。" : "");
+    } else if (s.state === "grace") {
+      hint.textContent = "暂时无法连接授权服务，离线宽限剩余约 " +
+        Math.ceil((s.grace_left_seconds || 0) / 86400) + " 天；恢复联网后会自动校验。";
+    } else if (s.state === "revoked") {
+      hint.textContent = "卡密已被吊销，连接器已停止。请联系管理员解绑或更换卡密后重新激活。";
+    } else if (s.state === "expired") {
+      hint.textContent = "离线宽限期已过。恢复联网后点击「立即校验」，或输入新卡密重新激活。";
+    } else {
+      hint.textContent = "每 6 小时在线校验一次；断网时进入离线宽限，被吊销后立即锁定。";
+    }
+    var verifyBtn = $("licenseVerifyBtn");
+    if (verifyBtn) {
+      verifyBtn.hidden = !s.activated || s.state === "revoked" || (offline && !s.server_configured);
+      setBtn(verifyBtn, "refresh", licenseVerifyText());
+    }
+  }
+
+  function loadLicenseStatus() {
+    return api("GET", "/license/status").then(function (s) {
+      renderLicenseStatus(s);
+      return s;
+    }).catch(function () { return null; });
+  }
+
+  function verifyLicenseNow() {
+    var btn = $("licenseVerifyBtn");
+    if (!btn) return;
+    btn.disabled = true;
+    setBtn(btn, "refresh", "校验中…");
+    api("POST", "/license/verify", {}).then(function (r) {
+      if (r.status) renderLicenseStatus(r.status);
+      if (r.ok) {
+        toast(r.message && r.message !== "校验通过" ? r.message : "授权校验通过");
+        return;
+      }
+      toast("校验未通过：" + (r.error || "未知原因"));
+      if (r.status && r.status.activated && !r.status.valid) {
+        setTimeout(function () { window.location.replace("/activate.html"); }, 1600);
+      }
+    }).catch(function (err) {
+      toast("校验失败：" + err.message);
+      loadLicenseStatus();
+    }).finally(function () {
+      btn.disabled = false;
+      setBtn(btn, "refresh", licenseVerifyText());
+    });
+  }
+
+  function copyLicenseMachine() {
+    if (licenseStatus && licenseStatus.machine_code) {
+      copyText(licenseStatus.machine_code);
+      return;
+    }
+    loadLicenseStatus().then(function (s) {
+      if (s && s.machine_code) copyText(s.machine_code);
+      else toast("暂时无法读取机器码");
+    });
+  }
+
   function saveSystemSettings() {
     var btn = $("saveSysBtn");
     btn.disabled = true;
@@ -2213,6 +2336,8 @@
     $("connLogJumpBtn").addEventListener("click", jumpToRecentError);
 
     // 设置页
+    $("licenseVerifyBtn").addEventListener("click", verifyLicenseNow);
+    $("licenseCopyBtn").addEventListener("click", copyLicenseMachine);
     $("saveAccessBtn").addEventListener("click", saveAccessSetting);
     $("savePwBtn").addEventListener("click", savePassword);
     $("saveSysBtn").addEventListener("click", saveSystemSettings);
@@ -2248,6 +2373,7 @@
     api("GET", "/auth/me").then(function (data) {
       $("userName").textContent = data.user.username;
       applyNoAuthUi(!!data.no_auth_run);
+      if (data.license) renderLicenseStatus(data.license);
       enterPanel();
     }).catch(function () { /* 未登录：保持登录屏 */ });
   }

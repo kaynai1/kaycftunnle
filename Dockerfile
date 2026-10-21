@@ -48,19 +48,32 @@ RUN set -eux; \
 # 应用代码：必须与项目根目录同源，且逐个显式 COPY
 # 注意：COPY 位于 FROM final 之后，才会作用在最终镜像上；
 #       若把 COPY 写在中间阶段，最终镜像里将缺少这些文件。
-COPY server.py cf.py /app/
+COPY server.py cf.py license.py license_ed25519.py /app/
 COPY static/ /app/static/
 
 # 构建期断言：确认关键文件确实进了镜像，避免"构建成功但运行缺文件"
 RUN set -eux; \
-    test -f /app/server.py || (echo "缺少 /app/server.py" >&2; exit 1); \
-    test -f /app/cf.py     || (echo "缺少 /app/cf.py" >&2; exit 1); \
-    test -f /app/static/index.html || (echo "缺少 /app/static/index.html" >&2; exit 1); \
-    test -f /app/static/app.js     || (echo "缺少 /app/static/app.js" >&2; exit 1); \
+    test -f /app/server.py   || (echo "缺少 /app/server.py" >&2; exit 1); \
+    test -f /app/cf.py       || (echo "缺少 /app/cf.py" >&2; exit 1); \
+    test -f /app/license.py  || (echo "缺少 /app/license.py" >&2; exit 1); \
+    test -f /app/license_ed25519.py || (echo "缺少 /app/license_ed25519.py（离线授权验签）" >&2; exit 1); \
+    test -f /app/static/index.html   || (echo "缺少 /app/static/index.html" >&2; exit 1); \
+    test -f /app/static/app.js       || (echo "缺少 /app/static/app.js" >&2; exit 1); \
+    test -f /app/static/activate.html || (echo "缺少 /app/static/activate.html" >&2; exit 1); \
+    test -f /app/static/activate.js   || (echo "缺少 /app/static/activate.js" >&2; exit 1); \
+    test -f /app/static/activate.css  || (echo "缺少 /app/static/activate.css" >&2; exit 1); \
     python -c "import ast,sys; ast.parse(open('/app/server.py',encoding='utf-8').read())" || \
       (echo "server.py 语法错误" >&2; exit 1); \
     python -c "import ast,sys; ast.parse(open('/app/cf.py',encoding='utf-8').read())" || \
       (echo "cf.py 语法错误" >&2; exit 1); \
+    python -c "import ast,sys; ast.parse(open('/app/license.py',encoding='utf-8').read())" || \
+      (echo "license.py 语法错误" >&2; exit 1); \
+    python -c "import ast,sys; ast.parse(open('/app/license_ed25519.py',encoding='utf-8').read())" || \
+      (echo "license_ed25519.py 语法错误" >&2; exit 1); \
+    python -c "import sys; sys.path.insert(0,'/app'); import license, license_ed25519; \
+      assert callable(license.verify_offline_license), '离线验签入口缺失'; \
+      print('离线公钥已内置' if license.OFFLINE_PUBLIC_KEY else '提示：OFFLINE_PUBLIC_KEY 仍为空，离线授权码不可用')" || \
+      (echo "授权模块自检失败" >&2; exit 1); \
     echo "代码自检通过"
 
 # data/、runtime/ 由运行时 volume 挂载提供，不打进镜像

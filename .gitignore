@@ -27,3 +27,13 @@ kaycftunnle.bundle
 
 # Windows 本地开发下载的连接器二进制
 cloudflared.exe
+
+# 离线授权私钥密文与签发台账（绝不提交）
+tools/offline-key.json
+tools/issued.json
+tools/codes-*.txt
+
+# Node 依赖与 wrangler 本地缓存
+node_modules/
+.wrangler/
+.dev.vars

@@ -21,6 +21,10 @@ services:
       # 默认监听 0.0.0.0:8567，一般无需改
       - DASHBOARD_HOST=0.0.0.0
       - DASHBOARD_PORT=8567
+      # 可选：预置授权服务地址；不填则首次打开面板时手动输入
+      # - KAY_LICENSE_URL=https://kay-license.<你的子域>.workers.dev
+      # 断网离线宽限天数，默认 7
+      # - KAY_OFFLINE_GRACE_DAYS=7
     ports:
       - "8567:8567"
     volumes:

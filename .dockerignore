@@ -16,6 +16,19 @@ dist/
 .fpk-build/
 .fnpack/
 packaging/
+license-worker/
+tests/
+tools/
+node_modules/
+package.json
+package-lock.json
+cloudflared.exe
+*.bundle
+
+# 离线授权私钥密文与签发台账：绝不出现在构建上下文里
+tools/offline-key.json
+tools/issued.json
+tools/codes-*.txt
 
 # 编辑器 / 系统垃圾
 .vscode/

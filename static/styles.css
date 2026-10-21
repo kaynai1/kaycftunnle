@@ -446,6 +446,7 @@ html[data-theme="dark"] .dot.is-ok{animation-name:pulse-dark;}
 .badge-muted{background:var(--theme-surface-raised);color:var(--theme-muted);}
 .badge-warn{background:var(--theme-warning-bg);color:var(--theme-warning-text);border:var(--stroke-1) solid var(--theme-warning-border);}
 .badge-ok{background:var(--theme-success-bg);color:var(--theme-success-text);border:var(--stroke-1) solid var(--theme-success-border);}
+.badge-bad{background:var(--theme-danger-bg);color:var(--theme-danger-text);border:var(--stroke-1) solid var(--theme-danger-border);}
 
 .empty-state{text-align:center;padding:var(--space-9) var(--space-5);color:var(--theme-muted);}
 .empty-art{width:184px;margin:0 auto var(--space-4);color:var(--theme-muted);}

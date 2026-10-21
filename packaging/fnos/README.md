@@ -202,7 +202,13 @@ sh build-fpk.sh --tar kaycftunnle.tar               # 使用现成的镜像 tar 
 sh build-fpk.sh --image ghcr.io/you/kaycftunnle:latest   # 远程镜像，安装时自动拉
 sh build-fpk.sh --no-embed                          # 不内嵌镜像
 sh build-fpk.sh --no-image                          # 不动镜像，仅打骨架（调试用）
+sh build-fpk.sh ... --license-url https://9ky.us.ci # 把卖家授权服务地址打进包里
 ```
+
+`--license-url` 会把它写进 compose 的 `KAY_LICENSE_URL`。这样买家装完直接就是「已配置授权服务」：
+激活页不再出现地址栏，在线卡密粘贴即用；离线批量码也在激活当场向服务端报到、完成设备绑定，
+台账立刻显示买家机器码。不填这个参数时，买家要自己展开「授权服务地址」填一次（只用离线码的可以一直不填，
+代价是这张码无法远程吊销）。
 
 ## 四、安装
 
@@ -319,6 +325,31 @@ docker logs kaycftunnle --tail 50      # 看具体报错
 ```
 
 最常见还是镜像问题或端口 8567 被占用。
+
+### 重启 NAS 后面板没自启 / 应用中心报「启动失败」
+
+两件事叠在一起：
+
+1. fnOS 的应用自启经常抢在 Docker 守护进程前面跑，那一次 `docker compose up` 连不上
+   daemon，而它**不重试**，界面就停在失败态。
+2. 旧的 `cmd/main stop` 执行的是 `compose down`（容器对象被删），所以 Docker 也没办法
+   在开机时替你把面板拉回来——只能等 fnOS 那次可能失败的自启。
+
+`1.7.0-src-test6` 起改成：`cmd/main` 最多等 Docker 就绪 60 秒并重试三次；「停止」只停不删；
+compose 的 `restart` 由 `unless-stopped` 改成 `always`，开机由 Docker 自己拉起面板。
+副作用要知道：应用中心点「停止」后如果重启 NAS，面板会自己回来；要一直停就在
+Docker/1Panel 里把该容器的重启策略改回 `unless-stopped`。
+
+面板代码里还有一处同源的坑：以前开机是**先**打 Cloudflare API 取隧道令牌（单次 15 秒超时、
+可能连着好几个请求）**再**监听 8567，网络没就绪时端口迟迟不出现，fnOS 的端口检测就判启动失败。
+现在先绑端口，自动连接放到后台线程（实测 `auto_connect` 卡住 20 秒时端口仍能在 0.5 秒内就绪）。
+
+自查：
+
+```bash
+docker inspect -f '{{.HostConfig.RestartPolicy.Name}} {{.State.Status}}' kaycftunnle
+journalctl -b | grep -i kaycftunnle | tail -30
+```
 
 ### 想彻底免掉「先构建」这一步
 

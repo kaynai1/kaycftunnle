@@ -20,9 +20,9 @@
   <meta name="color-scheme" content="light dark">
   <meta name="description" content="Kay-cftunnle 面板：自托管的 Cloudflare Tunnel 管理工具，API Token 托管、隧道管理、Ingress 映射、DNS 维护与 cloudflared 连接器控制，一键部署飞牛 NAS。">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23FF6B35'/%3E%3Cpath d='M6 27V15a10 10 0 0 1 20 0v12h-5V15a5 5 0 0 0-10 0v12H6Z' fill='%231C1917'/%3E%3C/svg%3E">
-  <script src="/theme.js?v=41"></script>
-  <link rel="stylesheet" href="/theme.css?v=41">
-  <link rel="stylesheet" href="/styles.css?v=41">
+  <script src="/theme.js?v=45"></script>
+  <link rel="stylesheet" href="/theme.css?v=45">
+  <link rel="stylesheet" href="/styles.css?v=45">
 </head>
 <body>
 
@@ -539,7 +539,37 @@
         <div class="page-head">
           <div class="page-eyebrow">04 / Settings</div>
           <h1 class="page-title">设置</h1>
-          <p class="page-sub">访问保护、面板密码、配置备份与系统信息；Cloudflare 凭据在「总览」页填写。</p>
+          <p class="page-sub">设备授权、访问保护、面板密码、配置备份与系统信息；Cloudflare 凭据在「总览」页填写。</p>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div class="card-head-txt">
+              <h2 class="card-title">设备授权</h2>
+              <p class="card-sub">卡密绑定当前 NAS，每 6 小时在线校验一次；被吊销后立即锁定面板并停止连接器。</p>
+            </div>
+            <div class="card-acts">
+              <span class="badge badge-muted" id="licenseBadge">读取中</span>
+              <button class="btn btn-ghost btn-sm btn-auto" id="licenseCopyBtn" type="button">
+                <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-copy"></use></svg>复制机器码
+              </button>
+              <button class="btn btn-ghost btn-sm btn-auto" id="licenseVerifyBtn" type="button">
+                <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-refresh"></use></svg><span>立即校验</span>
+              </button>
+            </div>
+          </div>
+          <div class="sys-info">
+            <div class="sys-row"><span class="sys-k">授权状态</span><span class="sys-v" id="licenseState">–</span></div>
+            <div class="sys-row"><span class="sys-k">激活方式</span><span class="sys-v" id="licenseMode">–</span></div>
+            <div class="sys-row"><span class="sys-k">授权码</span><span class="sys-v" id="licenseCode">–</span></div>
+            <div class="sys-row"><span class="sys-k">机器码</span><span class="sys-v" id="licenseMachine">–</span></div>
+            <div class="sys-row"><span class="sys-k">授权编号</span><span class="sys-v" id="licenseSerial">–</span></div>
+            <div class="sys-row"><span class="sys-k">到期时间</span><span class="sys-v" id="licenseExpires">–</span></div>
+            <div class="sys-row"><span class="sys-k">激活时间</span><span class="sys-v" id="licenseActivatedAt">–</span></div>
+            <div class="sys-row"><span class="sys-k">最近校验</span><span class="sys-v" id="licenseLastVerified">–</span></div>
+            <div class="sys-row"><span class="sys-k">授权服务</span><span class="sys-v" id="licenseServer">–</span></div>
+          </div>
+          <div class="form-hint" id="licenseHint"></div>
         </div>
 
         <div class="card">
@@ -665,6 +695,6 @@
 
 <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
-<script src="/app.js?v=41"></script>
+<script src="/app.js?v=45"></script>
 </body>
 </html>
