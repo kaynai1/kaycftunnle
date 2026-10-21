@@ -76,6 +76,8 @@ python server.py --check         # 只跑一次自检，打印状态 JSON
 
 > 下发隧道路由前，面板会先读取该隧道当前配置，**保留 Cloudflare 后台手写的 hostname**，只覆盖面板自己管理的同名规则；读取失败则取消下发，避免误删。
 
+> 规则的增删改会先落本地库并立即回包，DNS 记录与隧道路由随后在后台同步；网络慢时按钮不会一直转圈，后台同步失败会写进操作日志，规则行也会显示「DNS 已缺失 / 路由未下发」。
+
 ## 配置 Cloudflare 凭据
 
 在 [Cloudflare API Tokens](https://dash.cloudflare.com/profile/api-tokens) 创建自定义 Token，权限：
@@ -132,7 +134,7 @@ cloudflared 运行在 NAS 上可能需要连续不间断。服务端内置看门
 | `GET /api/ingresses` · `POST /api/ingresses` | Ingress 规则列表 / 创建（写隧道路由 + 同步 CNAME） |
 | `POST /api/ingresses/sync` | 把本地规则整份重新下发到各隧道的远程路由 |
 | `POST /api/ingresses/{id}` | 编辑规则（改服务地址 / 换隧道；DNS 用 PUT 原地更新） |
-| `DELETE /api/ingresses/{id}` | 删除规则并清理 Cloudflare DNS 记录 |
+| `DELETE /api/ingresses/{id}` | 删除规则（本地立即生效，DNS 记录与隧道路由后台清理） |
 | `GET /api/cloudflare/dns-records` | 当前 Zone 全部 DNS 记录，标注哪些由面板维护 |
 | `GET /api/connector/status` | 连接器状态：运行/二进制/PID/运行时间/看门狗/日志 |
 | `POST /api/connector/start` · `/stop` · `/restart` | 启动 / 停止 / 重启 cloudflared |

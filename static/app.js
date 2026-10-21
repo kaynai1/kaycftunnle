@@ -44,7 +44,8 @@
 
   /* ------------------------------------------------------------ API 封装 */
 
-  function api(method, path, body) {
+  function api(method, path, body, options) {
+    options = options || {};
     var opts = { method: method, headers: {}, credentials: "same-origin" };
     if (body !== undefined) {
       opts.headers["Content-Type"] = "application/json";
@@ -64,9 +65,15 @@
         return data;
       });
     });
-    // 15s 超时兜底：网络挂起时按钮不会永远转圈
+    // 读接口要等 Cloudflare 的并行检查；写接口的云端同步已放到后台，
+    // 但建 DNS 记录仍在请求里，留足余量，避免「服务端成功、前端先超时」。
+    var timeoutMs = options.timeoutMs || (method === "GET" ? 20000 : 45000);
     return Promise.race([req, new Promise(function (_, reject) {
-      setTimeout(function () { reject(new Error("请求超时（15 秒），请检查网络后重试")); }, 15000);
+      setTimeout(function () {
+        var err = new Error("请求超时（" + Math.round(timeoutMs / 1000) + " 秒），服务器可能仍在处理");
+        err.timeout = true;
+        reject(err);
+      }, timeoutMs);
     })]);
   }
 
@@ -103,11 +110,25 @@
 
   // 规则写进本地库之后还要下发到隧道；下发失败时流量是不通的，必须让用户看见
   function notifySync(r, doneText, okText) {
+    if (r && r.sync_queued) {
+      toast(doneText + "，隧道路由正在后台同步");
+      return;
+    }
     if (r && r.synced === false) {
       toast(doneText + "，但隧道路由下发失败：" + (r.sync_error || "未知原因"));
       return;
     }
     toast(okText || (doneText + "，隧道路由已生效"));
+  }
+
+  // 超时不等于失败：服务端可能已经处理完，直接报「删除失败」会误导用户重试
+  function actionFailed(label, err, reconcile) {
+    if (err && err.timeout) {
+      toast(label + "结果待确认：请求超时，正在核对…");
+      if (reconcile) setTimeout(reconcile, 1200);
+      return;
+    }
+    toast(label + "失败：" + err.message);
   }
 
   /* ------------------------------------------------------------ 页内表单 / 行内展开 */
@@ -153,7 +174,9 @@
     document.querySelectorAll(".tunnel-item,.ingress-item").forEach(function (el) {
       el.classList.remove("is-deleting");
     });
-    ["tunnelForm", "ingressForm", "importConfirm", "clearLogsConfirm"].forEach(closePanel);
+    // 访问规则表单是卡片内的常驻区域，不能跟着切页/展开行一起收起，
+    // 否则隧道列表还在、添加按钮却消失，直到下一次 /tunnels 回来
+    ["tunnelForm", "importConfirm", "clearLogsConfirm"].forEach(closePanel);
   }
 
   function copyText(text) {
@@ -245,7 +268,9 @@
     if (route === "connector") startConnectorPolling();
     else stopConnectorPolling();
 
-    if (route === "overview") { refreshOverview(); loadCfStatus(); refreshTunnels(); refreshIngresses(); }
+    // 切回总览时先按已知隧道恢复规则表单，避免等 /tunnels 云端往返期间按钮消失
+    if (route === "overview" && overviewTunnel) updateIngressGate(overviewTunnel);
+    if (route === "overview") { refreshOverview(); loadCfStatus(); refreshTunnels(true); refreshIngresses(true); }
     else if (route === "dns") { refreshZones(); refreshDnsRecords(); }
     else if (route === "connector") { refreshConnector(); loadSystemSettings(); }
     else if (route === "settings") { loadSystemInfo(); loadSystemSettings(); loadLicenseStatus(); refreshLogs(); }
@@ -281,6 +306,7 @@
         ? { running: !!c.running, binary: !!c.binary_exists, uptime: c.uptime || 0 }
         : { error: true };
       updateOverviewStats();
+      syncGateFromConnector(c);
     }).catch(function () {
       setLive("bad", "状态获取失败");
       ovStats.conn = { error: true };
@@ -1080,7 +1106,7 @@
     var account = $("cfAccount").value.trim();
     btn.disabled = true;
     btn.textContent = "验证中…";
-    api("POST", "/cloudflare/verify", { api_token: token, account_id: account }).then(function (res) {
+    api("POST", "/cloudflare/verify", { api_token: token, account_id: account }, { timeoutMs: 90000 }).then(function (res) {
       var r = res.report || {};
       renderReport(r);
       if (!res.ok) {
@@ -1264,11 +1290,11 @@
     return '<div class="skeleton-list" role="status" aria-label="加载中">' + items + '</div>';
   }
 
-  function refreshTunnels() {
+  function refreshTunnels(silent) {
     var list = $("tunnelsList"), notice = $("tunnelsNotice");
     notice.hidden = true;
     $("tunnelsEmpty").hidden = true;
-    list.innerHTML = skeletonList(3);
+    if (!silent || !list.children.length) list.innerHTML = skeletonList(3);
     api("GET", "/tunnels").then(function (t) {
       list.innerHTML = "";
       setupState.cf = !!t.configured;
@@ -1284,7 +1310,8 @@
       if (!t.ok) {
         ovStats.tunnels = { error: true };
         updateOverviewStats();
-        updateIngressGate(null);
+        // 云端列表偶发失败时不要把还能用的连接器状态一起清掉
+        if (!overviewTunnel) updateIngressGate(null);
         notice.hidden = false;
         notice.innerHTML = '<span class="notice-ico">!</span><span>获取隧道列表失败：' + esc(t.error || "未知错误") +
           '。请检查 Token 权限后重新保存凭据。</span>';
@@ -1292,10 +1319,10 @@
       }
       renderTunnels(t.tunnels || []);
     }).catch(function (err) {
-      list.innerHTML = "";
+      if (!silent) list.innerHTML = "";
       ovStats.tunnels = { error: true };
       updateOverviewStats();
-      updateIngressGate(null);
+      if (!overviewTunnel) updateIngressGate(null);
       notice.hidden = false;
       notice.innerHTML = '<span class="notice-ico">!</span><span>' + esc(err.message || "加载失败") + '</span>';
     });
@@ -1363,16 +1390,16 @@
           var conns = t ? (Array.isArray(t.connections) ? t.connections.length : (Number(t.connections) || 0)) : 0;
           if (t && t.local_running && conns > 0) {
             toast("隧道「" + name + "」已连接");
-            refreshTunnels();
+            refreshTunnels(true);
             refreshLiveChip();
-            refreshIngresses();
+            refreshIngresses(true);
             return;
           }
           if (tries >= 12) {
             toast(t && t.local_running
               ? "连接器已启动，云端还在确认，请稍后刷新"
               : "连接器已启动，但未检测到云端连接");
-            refreshTunnels();
+            refreshTunnels(true);
             refreshLiveChip();
             return;
           }
@@ -1380,7 +1407,7 @@
         }).catch(function () {
           if (tries >= 12) {
             toast("连接器已启动，状态确认超时，请稍后刷新");
-            refreshTunnels();
+            refreshTunnels(true);
             return;
           }
           setTimeout(poll, 1000);
@@ -1388,7 +1415,7 @@
       })();
     }).catch(function (err) {
       toast("连接失败：" + err.message);
-      refreshTunnels();
+      refreshTunnels(true);
     });
   }
   function disconnectTunnel(btn) {
@@ -1396,9 +1423,9 @@
     btn.textContent = "断开中…";
     api("POST", "/connector/stop", {}).then(function () {
       toast("已断开连接");
-      refreshTunnels();
+      refreshTunnels(true);
       refreshLiveChip();
-      refreshIngresses();
+      refreshIngresses(true);
     }).catch(function (err) {
       toast("断开失败：" + err.message);
       btn.disabled = false;
@@ -1439,9 +1466,11 @@
       ok.textContent = "删除中…";
       api("DELETE", "/tunnels/" + encodeURIComponent(id)).then(function () {
         toast("隧道「" + name + "」已删除");
-        refreshTunnels();
+        item.remove();
+        if (!$("tunnelsList").children.length) renderTunnels([]);
+        refreshTunnels(true);
       }).catch(function (err) {
-        toast("删除失败：" + err.message);
+        actionFailed("删除", err, function () { refreshTunnels(true); });
         ok.disabled = false;
         ok.textContent = "确认删除";
       });
@@ -1477,9 +1506,9 @@
     api("POST", "/tunnels", { name: name }).then(function () {
       $("mTunnelName").value = "";
       toast("隧道「" + name + "」已创建，点「连接」启动它");
-      refreshTunnels();
+      refreshTunnels(true);
     }).catch(function (err) {
-      toast("创建失败：" + err.message);
+      actionFailed("创建", err, function () { refreshTunnels(true); });
     }).finally(function () {
       btn.disabled = false;
       btn.textContent = "创建隧道";
@@ -1533,7 +1562,9 @@
     var list = $("zonesList"), notice = $("zonesNotice");
     notice.hidden = true;
     $("zonesEmpty").hidden = true;
-    list.innerHTML = '<div class="list-loading">加载中…</div>';
+    // 已经有缓存就先渲染，切到 DNS 页时不再先闪一行「加载中…」
+    if (zonesCache.length) renderZones(zonesCache, currentPrimaryZone);
+    else list.innerHTML = '<div class="list-loading">加载中…</div>';
     api("GET", "/cloudflare/zones").then(function (z) {
       list.innerHTML = "";
       if (!z.configured) {
@@ -1782,7 +1813,7 @@
       } else {
         toast("已把 " + r.results.length + " 条隧道的路由下发完成");
       }
-      refreshIngresses();
+      refreshIngresses(true);
     }).catch(function (err) {
       toast("下发失败：" + err.message);
     }).then(function () {
@@ -1906,6 +1937,24 @@
     }
   }
 
+  // 连接器状态是本机接口，比 /tunnels 的云端往返快得多。
+  // 开机时先用它把规则表单解锁，避免用户盯着「先连接隧道」以为连不上。
+  function syncGateFromConnector(c) {
+    if (!c || c.error) return;
+    // 正在等云端确认时以 /tunnels 的口径为准，别让快速轮询把「连接中」改成「已连接」
+    if (setupState.pendingTunnel) return;
+    if (c.running && c.current_tunnel_id) {
+      if (!overviewTunnel || overviewTunnel.id !== c.current_tunnel_id) {
+        updateIngressGate({
+          id: c.current_tunnel_id,
+          name: c.current_tunnel_name || "当前隧道",
+        });
+      }
+    } else if (!c.running && !setupState.pendingTunnel) {
+      updateIngressGate(null);
+    }
+  }
+
   function addIngress() {
     if (!overviewTunnel) { toast("请先连接隧道"); return; }
     var subdomain = $("mIngSubdomain").value.trim().toLowerCase();
@@ -1937,10 +1986,9 @@
       $("mIngService").value = "";
       $("mIngProbe").hidden = true;
       notifySync(r, "规则已创建");
-      refreshIngresses();
-      refreshDnsRecords();
+      refreshIngresses(true);
     }).catch(function (err) {
-      toast("创建失败：" + err.message);
+      actionFailed("创建", err, function () { refreshIngresses(true); });
     }).finally(function () {
       ok.disabled = false;
       ok.textContent = "添加规则";
@@ -2009,10 +2057,9 @@
       }).then(function (r) {
         collapseDetail(item);
         notifySync(r, "规则已更新");
-        refreshIngresses();
-        refreshDnsRecords();
+        refreshIngresses(true);
       }).catch(function (err) {
-        toast("更新失败：" + err.message);
+        actionFailed("更新", err, function () { refreshIngresses(true); });
         ok.disabled = false;
         ok.textContent = "保存";
       });
@@ -2034,11 +2081,13 @@
       ok.textContent = "删除中…";
       api("DELETE", "/ingresses/" + encodeURIComponent(id)).then(function (r) {
         collapseDetail(item);
+        // 本地已经删掉，先把行拿掉再静默核对，别让「删除中…」陪着等云端
+        item.remove();
+        if (!$("ingressList").children.length) renderIngresses([]);
         notifySync(r, "已删除", "已删除，隧道路由已删除");
-        refreshIngresses();
-        refreshDnsRecords();
+        refreshIngresses(true);
       }).catch(function (err) {
-        toast("删除失败：" + err.message);
+        actionFailed("删除", err, function () { refreshIngresses(true); });
         ok.disabled = false;
         ok.textContent = "确认删除";
       });

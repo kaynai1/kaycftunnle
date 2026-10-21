@@ -247,5 +247,22 @@ class AutoConnectRetryTest(unittest.TestCase):
         mgr.auto_connect()
 
 
+class ConnectorTunnelNameTest(unittest.TestCase):
+    """状态接口要能给出隧道名，前端才能不等云端列表就先解锁规则表单。"""
+
+    def test_resolve_tunnel_remembers_name(self):
+        mgr = make_manager({"default_tunnel_id": ""})
+        fake = mock.Mock()
+        fake.list_tunnels.return_value = [
+            {"id": "a" * 32, "name": "alpha"},
+            {"id": "b" * 32, "name": "beta"},
+        ]
+        with mock.patch.object(server, "CloudflareClient", return_value=fake):
+            resolved, err = mgr._resolve_tunnel("b" * 32)
+        self.assertEqual(resolved, "b" * 32)
+        self.assertIsNone(err)
+        self.assertEqual(mgr._resolved_tunnel_name, "beta")
+
+
 if __name__ == "__main__":
     unittest.main()

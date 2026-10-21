@@ -76,7 +76,7 @@ SESSION_COOKIE = "kay_cftunnle_session"
 
 APP_VERSION = "1.7.0"
 # 静态资源版本号：改前端后递增，用于破浏览器缓存（需与 index.html 的 ?v= 保持一致）
-STATIC_REV = 45
+STATIC_REV = 47
 START_TIME = time.time()
 SESSION_MAX_AGE = 7 * 24 * 60 * 60
 # 连接器运行超过该秒数视为「稳定运行」，看门狗重试计数归零
@@ -439,6 +439,8 @@ class ConnectorManager:
         self.started_at: float = 0.0
         self._proc_started_at: float = 0.0  # 本次进程拉起时间，用于判定「刚启动就挂」
         self.current_tunnel_id: str = ""
+        self.current_tunnel_name: str = ""
+        self._resolved_tunnel_name: str = ""
         self._log_fh: Optional[Any] = None  # cloudflared 日志句柄，停止时关闭
         self.lock = threading.Lock()
         self.log_path = RUNTIME_DIR / "connector.log"
@@ -528,6 +530,7 @@ class ConnectorManager:
 
     def _resolve_tunnel(self, tunnel_id: str = "") -> Tuple[Optional[str], Optional[str]]:
         """确定要启动的隧道：参数 > 配置默认 > 配过访问规则的 > 列表第一条。"""
+        self._resolved_tunnel_name = ""
         if not tunnel_id:
             tunnel_id = (self.cfg.get("connector") or {}).get("default_tunnel_id", "")
         cf = self.cfg.get("cloudflare") or {}
@@ -544,11 +547,17 @@ class ConnectorManager:
         if tunnel_id:
             for t in tunnels:
                 if t["id"] == tunnel_id:
+                    self._resolved_tunnel_name = t.get("name", "")
                     return t["id"], None
         # 还没记下默认隧道时，挑一条本机配过访问规则的：账号里通常留着几条没用的空隧道，
         # 连错那条的表现是「面板说已连接、域名却打不开」，比不连更难排查。
         with_rules = self._tunnel_with_rules([t["id"] for t in tunnels])
-        return with_rules or tunnels[0]["id"], None
+        chosen = with_rules or tunnels[0]["id"]
+        for t in tunnels:
+            if t["id"] == chosen:
+                self._resolved_tunnel_name = t.get("name", "")
+                break
+        return chosen, None
 
     @staticmethod
     def _tunnel_with_rules(tunnel_ids: List[str]) -> str:
@@ -689,6 +698,7 @@ class ConnectorManager:
                 self.started_at = time.time()
                 self._proc_started_at = self.started_at
                 self.current_tunnel_id = resolved
+                self.current_tunnel_name = self._resolved_tunnel_name
 
                 # 启动后短暂观察：cloudflared 参数不被接受、令牌无效时会在 1 秒内退出。
                 # 以前直接返回 ok=True，界面停在「启动中…」，只有等看门狗下一轮才发现已经死了，
@@ -717,6 +727,7 @@ class ConnectorManager:
                 self.proc = None
                 self._clear_pid()
                 self.current_tunnel_id = ""
+                self.current_tunnel_name = ""
                 if attempt + 1 < len(candidates):
                     continue
                 # 已经是最后一套参数：重试多少次结果都一样，直接放弃并保留原因，
@@ -854,6 +865,7 @@ class ConnectorManager:
             self._close_log_fh()
             self._clear_pid()
             self.current_tunnel_id = ""
+            self.current_tunnel_name = ""
             add_log("connector", "停止连接器（PID %s）" % self.proc.pid)
             add_connector_event("stop", "手动停止（PID %s）" % self.proc.pid)
             return {"ok": True, "was_running": True}
@@ -1056,6 +1068,7 @@ class ConnectorManager:
                 "ip_version": conn_cfg.get("ip_version", "ipv4"),
                 "default_tunnel_id": conn_cfg.get("default_tunnel_id", ""),
                 "current_tunnel_id": self.current_tunnel_id,
+                "current_tunnel_name": self.current_tunnel_name,
                 "auto_connect": conn_cfg.get("auto_connect", False),
                 "watchdog": self.watchdog_info(),
                 "logs": self._read_logs(200),
@@ -1256,6 +1269,40 @@ def login_fail(ip: str) -> None:
 def login_ok(ip: str) -> None:
     with _FAIL_LOCK:
         _FAIL_RECORD.pop(ip, None)
+
+
+# ------------------------------------------------------------------ Cloudflare 读取缓存与后台同步
+
+# 总览页每次进入都要核对 DNS/路由，串行请求遇上慢网络会让页面像卡死。
+# 这里只缓存展示用的健康检查结果；写路径永远读实时数据，写完就整体失效。
+CF_HEALTH_CACHE_TTL = 8
+_CF_READ_CACHE: Dict[str, Tuple[float, Any]] = {}
+_CF_READ_LOCK = threading.Lock()
+# 路由下发是「读远端配置 → 整份 PUT」，并发下发会互相覆盖，必须串行
+_SYNC_LOCK = threading.Lock()
+
+
+def _cf_cached(key: str, ttl: float, fn):
+    """带 TTL 的读取缓存；返回 (value, error)，不向上抛 CloudflareError。"""
+    now = time.time()
+    with _CF_READ_LOCK:
+        hit = _CF_READ_CACHE.get(key)
+        if hit and now - hit[0] < ttl:
+            return hit[1], None
+    try:
+        value = fn()
+    except CloudflareError as exc:
+        with _CF_READ_LOCK:
+            _CF_READ_CACHE.pop(key, None)
+        return None, exc
+    with _CF_READ_LOCK:
+        _CF_READ_CACHE[key] = (time.time(), value)
+    return value, None
+
+
+def _cf_cache_clear() -> None:
+    with _CF_READ_LOCK:
+        _CF_READ_CACHE.clear()
 
 
 # ------------------------------------------------------------------ HTTP 处理
@@ -1699,6 +1746,7 @@ class PanelHandler(BaseHTTPRequestHandler):
         token = str(body.get("api_token") or "").strip()
         account_id = str(body.get("account_id") or "").strip()
         update_cloudflare_settings(self.cfg, token, account_id, None)
+        _cf_cache_clear()
         add_log("settings", "Cloudflare 凭据已保存（Token %s）" % ("已更新" if token else "未改动"))
         self._api_cf_status()
 
@@ -2065,6 +2113,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             self._send_error_json(400, str(exc))
             return
         add_log("tunnels", "删除隧道 " + tunnel_id[:8])
+        _cf_cache_clear()
         self._send_json({"ok": True})
 
     def _api_tunnel_token(self, tunnel_id: str) -> None:
@@ -2100,24 +2149,38 @@ class PanelHandler(BaseHTTPRequestHandler):
             ing["full_name"] = _rule_hostname(ing.get("subdomain"), ing.get("zone_name"))
         if ingresses:
             zone_ids = sorted({i["zone_id"] for i in ingresses if i.get("zone_id")})
+            tunnel_ids = sorted({i["tunnel_id"] for i in ingresses if i.get("tunnel_id")})
             existing: Dict[str, set] = {}
-            for zid in zone_ids:
-                try:
-                    recs = client.list_dns_records(zid)
-                    existing[zid] = {(r.get("name") or "").lower() for r in recs}
-                except CloudflareError:
-                    existing[zid] = set()
+            routes: Dict[str, list] = {}
+            # 一个 Zone 一条 DNS 列表、一条隧道一次 ingress 读取；串行时条目越多等得越久。
+            # 这些调用互不依赖，并发发出，冷缓存时也只等最慢的那一个请求。
+            def dns_names(zone_id: str):
+                return {(r.get("name") or "").lower() for r in client.list_dns_records(zone_id)}
+
+            with ThreadPoolExecutor(max_workers=min(16, max(1, len(zone_ids) + len(tunnel_ids)))) as pool:
+                zone_jobs = {
+                    pool.submit(_cf_cached, "dnsnames:" + zid, CF_HEALTH_CACHE_TTL,
+                                lambda z=zid: dns_names(z)): zid
+                    for zid in zone_ids
+                }
+                route_jobs = {
+                    pool.submit(_cf_cached, "ingress:" + tid, CF_HEALTH_CACHE_TTL,
+                                lambda t=tid: client.get_tunnel_ingress(t)): tid
+                    for tid in tunnel_ids
+                }
+                for future, zid in zone_jobs.items():
+                    names, _ = future.result()
+                    existing[zid] = names or set()
+                for future, tid in route_jobs.items():
+                    value, error = future.result()
+                    # 拉取失败时不下 route_missing 结论，避免误报
+                    if error is None:
+                        routes[tid] = value or []
             for ing in ingresses:
                 full = _rule_hostname(ing["subdomain"], ing["zone_name"]).lower()
                 names = existing.get(ing["zone_id"]) or set()
                 ing["dns_missing"] = bool(names) and full not in names
             # 再对照隧道远程配置：DNS 有记录但隧道没这条 hostname 一样打不开
-            routes: Dict[str, list] = {}
-            for tid in sorted({i["tunnel_id"] for i in ingresses if i.get("tunnel_id")}):
-                try:
-                    routes[tid] = client.get_tunnel_ingress(tid)
-                except CloudflareError:
-                    continue  # 拉取失败时不下 route_missing 结论，避免误报
             for ing in ingresses:
                 tid = ing.get("tunnel_id") or ""
                 if tid not in routes:
@@ -2211,6 +2274,10 @@ class PanelHandler(BaseHTTPRequestHandler):
             return race.get("id") or ""
 
     def _sync_tunnel_ingress(self, client, tunnel_id: str, drop=()):
+        with _SYNC_LOCK:
+            return self._sync_tunnel_ingress_locked(client, tunnel_id, drop)
+
+    def _sync_tunnel_ingress_locked(self, client, tunnel_id: str, drop=()):
         """把该隧道的路由整份下发到 Cloudflare 远程配置。
 
         只建 DNS CNAME 是不够的：边缘按子域名找到隧道后，还要在隧道 config 的
@@ -2257,7 +2324,46 @@ class PanelHandler(BaseHTTPRequestHandler):
             return False, str(exc)
         add_log("ingress", "已下发 %d 条路由到隧道 %s（另保留后台路由 %d 条）"
                 % (len(rows), tunnel_id[:8], kept))
+        _cf_cache_clear()
         return True, ""
+
+    def _queue_ingress_sync(self, client, tunnel_id: str, drop=()) -> None:
+        """本地已经落库，路由下发交给后台线程，界面不必等云端往返。"""
+        if not tunnel_id:
+            return
+
+        def job():
+            try:
+                self._sync_tunnel_ingress(client, tunnel_id, drop=drop)
+            except Exception as exc:  # pragma: no cover - 兜底不让后台线程静默死掉
+                add_log("ingress", "后台路由同步异常：" + str(exc), "error")
+
+        threading.Thread(target=job, name="ingress-sync", daemon=True).start()
+
+    def _queue_ingress_cleanup(self, client, zone_id: str, record_id: str,
+                               tunnel_id: str, hostname: str) -> None:
+        """后台清理被删规则的 DNS 记录并从隧道路由里摘掉。"""
+        def job():
+            try:
+                if record_id:
+                    # 删除后用户可能马上重建同名规则，_upsert_dns_cname 会复用同一条
+                    # 记录 id；此时再删就把新规则一起删了，必须先确认没被接管。
+                    with db_connect() as conn:
+                        reused = conn.execute(
+                            "SELECT 1 FROM ingress_rules WHERE cf_record_id=? LIMIT 1", (record_id,)
+                        ).fetchone()
+                    if reused:
+                        add_log("ingress", "DNS 记录已被新规则接管，跳过删除：" + hostname)
+                    else:
+                        try:
+                            client.delete_dns_record(zone_id, record_id)
+                        except CloudflareError as exc:
+                            add_log("ingress", "DNS 记录删除失败：" + str(exc), "warn")
+                self._sync_tunnel_ingress(client, tunnel_id, drop=(hostname,))
+            except Exception as exc:  # pragma: no cover - 兜底
+                add_log("ingress", "后台清理异常：" + str(exc), "error")
+
+        threading.Thread(target=job, name="ingress-cleanup", daemon=True).start()
 
     def _api_ingress_sync(self) -> None:
         """把本地规则重新整份下发到涉及的每条隧道。
@@ -2329,10 +2435,11 @@ class PanelHandler(BaseHTTPRequestHandler):
                 (subdomain, zone_id, zone_name, tunnel_id, tunnel_name, service, record_id, now, now),
             )
         add_log("ingress", "创建 %s → %s（隧道 %s）" % (full_name, service, tunnel_name or tunnel_id[:8]))
-        synced, sync_error = self._sync_tunnel_ingress(client, tunnel_id)
+        _cf_cache_clear()
+        self._queue_ingress_sync(client, tunnel_id)
         self._send_json({"ok": True, "ingress": {"subdomain": subdomain, "full_name": full_name,
                                                   "record_id": record_id},
-                         "synced": synced, "sync_error": sync_error})
+                         "sync_queued": True})
 
     def _api_ingress_update(self, ingress_id: str) -> None:
         """就地更新 Ingress 规则：本地服务地址 / 隧道。
@@ -2398,14 +2505,15 @@ class PanelHandler(BaseHTTPRequestHandler):
                 (service, new_tunnel_id, new_tunnel_name, new_record_id, now, ingress_id),
             )
         add_log("ingress", "更新规则 %s → %s" % (full_name, service))
-        synced, sync_error = self._sync_tunnel_ingress(client, new_tunnel_id)
+        _cf_cache_clear()
+        self._queue_ingress_sync(client, new_tunnel_id)
         if row["tunnel_id"] and row["tunnel_id"] != new_tunnel_id:
             # 换隧道后旧隧道里仍留着这条 hostname，要把它从旧隧道路由里摘掉再重下
-            self._sync_tunnel_ingress(client, row["tunnel_id"], drop=(full_name,))
+            self._queue_ingress_sync(client, row["tunnel_id"], drop=(full_name,))
         self._send_json({"ok": True, "ingress": {
             "id": ingress_id, "full_name": full_name, "service": service,
             "tunnel_id": new_tunnel_id, "tunnel_name": new_tunnel_name,
-        }, "synced": synced, "sync_error": sync_error})
+        }, "sync_queued": True})
 
     def _api_dns_records_list(self) -> None:
         """列出当前 Zone 的全部 DNS 记录，并标注哪些由本面板维护。"""
@@ -2454,20 +2562,15 @@ class PanelHandler(BaseHTTPRequestHandler):
             return
         zone_id = row["zone_id"]
         record_id = row["cf_record_id"]
-        # 清理 Cloudflare DNS 记录
-        if record_id:
-            try:
-                client.delete_dns_record(zone_id, record_id)
-            except CloudflareError as exc:
-                add_log("ingress", "DNS 记录删除失败：" + str(exc), "warn")
-                # 继续删除本地记录，避免卡死
+        hostname = _rule_hostname(row["subdomain"], row["zone_name"])
+        # 本地这条先删掉、立刻回包；DNS 记录与隧道路由放后台清理，
+        # 避免用户在网络慢时要盯着「删除中…」几十秒。
         with db_connect() as conn:
             conn.execute("DELETE FROM ingress_rules WHERE id=?", (ingress_id,))
-        add_log("ingress", "删除 %s → %s" % (_rule_hostname(row["subdomain"], row["zone_name"]), row["service"]))
-        # 点名要删的 hostname，否则它会被当成后台手写路由原地保留下来
-        synced, sync_error = self._sync_tunnel_ingress(
-            client, row["tunnel_id"], drop=(_rule_hostname(row["subdomain"], row["zone_name"]),))
-        self._send_json({"ok": True, "synced": synced, "sync_error": sync_error})
+        add_log("ingress", "删除 %s → %s" % (hostname, row["service"]))
+        _cf_cache_clear()
+        self._queue_ingress_cleanup(client, zone_id, record_id, row["tunnel_id"], hostname)
+        self._send_json({"ok": True, "sync_queued": True})
 
     # ---- 连接器（M4） ----
 
