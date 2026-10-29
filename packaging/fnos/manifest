@@ -1,5 +1,5 @@
 appname      = kaycftunnle
-version      = 1.7.0
+version      = 1.7.1
 display_name = Kay-cftunnle
 desc         = Cloudflare Tunnel 自托管管理面板：管理隧道、Ingress 规则、DNS 记录，并托管 cloudflared 连接器进程。支持在线卡密与离线授权码两种激活方式，均绑定设备。
 source       = thirdparty
@@ -19,4 +19,4 @@ service_port = 8567
 checkport    = true
 ctl_stop     = true
 
-changelog = 新增在线卡密激活：卡密与 NAS 机器码绑定，每 6 小时在线校验，支持离线宽限、吊销锁定与管理员解绑换机；未激活时自动进入激活页并停止连接器；设置页新增设备授权状态卡。此外保留 1.5.0 的规则行内测试、连接器稳定性时间线、日志筛选与 DNS 快捷操作。
+changelog = 修复项：开机自动把隧道连上并记住最近连接的隧道；修复添加规则表单消失、规则操作不同步的问题。

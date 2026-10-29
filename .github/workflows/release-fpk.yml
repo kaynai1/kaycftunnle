@@ -1,0 +1,37 @@
+name: build-fpk
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t kaycftunnle:latest .
+
+      - name: Build FPK (embed image)
+        run: sh packaging/fnos/build-fpk.sh
+
+      - name: Generate SHA256
+        run: f=$(ls dist/*.fpk | head -1) && sha256sum "$f" > "$f.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kaycftunnle-fpk
+          path: dist/*
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.fpk dist/*.sha256 --title "$GITHUB_REF_NAME" --generate-notes
