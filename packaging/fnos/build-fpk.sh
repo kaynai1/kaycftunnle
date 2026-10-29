@@ -8,13 +8,16 @@
 #   sh build-fpk.sh --image <仓库/镜像:tag>     # 指定镜像名且不内嵌（已推到仓库时用）
 #   sh build-fpk.sh --tar <镜像.tar>           # 使用已导出的镜像 tar 内嵌进包
 #   sh build-fpk.sh --no-image                 # 完全不处理镜像，只打应用骨架（仅调试）
+#   sh build-fpk.sh ... --output-suffix -offline
+#                                              # 产物名追加后缀，便于同时发布在线/离线包
+#   sh build-fpk.sh ... --platform x86         # 写入 manifest.platform（x86/arm/all）
 #   sh build-fpk.sh --src-overlay --image ghcr.io/kaynai1/kaycftunnle:latest
 #                                              # 测试包：基础镜像 + 当前源码绑定覆盖，无需重建镜像
 #   sh build-fpk.sh ... --license-url https://9ky.us.ci
 #                                              # 把卖家授权服务地址打进包里：
 #                                              # 买家激活页无需手填，且离线码激活当场就能报到绑定设备
 #
-# 产物：dist/kaycftunnle-<版本>.fpk
+# 产物：dist/kaycftunnle-<版本><后缀>.fpk
 #
 # 依赖：官方 fnpack（缺失时自动下载到 .fnpack/）
 # =============================================================================
@@ -49,6 +52,8 @@ IMAGE_TAR=""
 EMBED_IMAGE="auto"
 SRC_OVERLAY="no"
 LICENSE_URL=""
+OUTPUT_SUFFIX=""
+PACKAGE_PLATFORM=""
 
 info() { printf '\033[32m[*]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[!]\033[0m %s\n' "$*" >&2; }
@@ -63,7 +68,9 @@ while [ $# -gt 0 ]; do
     --no-image) EMBED_IMAGE="skip"; shift ;;
     --src-overlay) SRC_OVERLAY="yes"; shift ;;
     --license-url) LICENSE_URL="$2"; shift 2 ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    --output-suffix) OUTPUT_SUFFIX="$2"; shift 2 ;;
+    --platform) PACKAGE_PLATFORM="$2"; shift 2 ;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
     *) err "未知参数: $1"; exit 1 ;;
   esac
 done
@@ -89,6 +96,11 @@ mkdir -p "$BUILD_DIR"
 (cd "$SCRIPT_DIR" && tar -cf - --exclude='build' --exclude='dist' --exclude='.DS_Store' .) | (cd "$BUILD_DIR" && tar -xf -)
 rm -f "$BUILD_DIR/make_icons.py" "$BUILD_DIR/build-fpk.sh" "$BUILD_DIR/README.md" "$BUILD_DIR/build-offline.sh"
 find "$BUILD_DIR" -name '.DS_Store' -delete 2>/dev/null || true
+
+if [ -n "$PACKAGE_PLATFORM" ]; then
+  sed -i -E "s/^platform[[:space:]]*=.*/platform     = ${PACKAGE_PLATFORM}/" "$BUILD_DIR/manifest"
+  info "应用平台: $PACKAGE_PLATFORM"
+fi
 
 # ---------------------------------------------------------------- 镜像处理
 IMG_TAR="$BUILD_DIR/app/docker/image.tar"
@@ -148,6 +160,17 @@ skip)
   info "跳过镜像处理（--no-image），仅用于结构调试"
   ;;
 esac
+
+# 离线包在 install_init 阶段读取该文件并导入 image.tar；在线包不生成此文件。
+if [ "$EMBED_IMAGE" = "yes" ]; then
+  IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$IMAGE_NAME" 2>/dev/null || true)
+  cat > "$BUILD_DIR/cmd/offline-image.env" <<EOF
+IMAGE_NAME=${IMAGE_NAME}
+IMAGE_ID=${IMAGE_ID}
+EOF
+else
+  rm -f "$BUILD_DIR/cmd/offline-image.env"
+fi
 
 # 远程仓库镜像（GHCR / 私有仓库）需要允许拉取；本地镜像则禁止拉取避免超时
 case "$IMAGE_NAME" in
@@ -378,15 +401,25 @@ info "结构校验通过"
 
 # ---------------------------------------------------------------- 打包
 chmod +x "$BUILD_DIR"/cmd/* 2>/dev/null || true
+# Windows 检出的 CRLF 会让 NAS 上的 shebang 变成 /bin/bash\r，提前统一为 LF。
+CR=$(printf '\r')
+for f in "$BUILD_DIR"/cmd/*; do
+  if grep -q "$CR" "$f"; then
+    tr -d '\r' < "$f" > "$f.tmp" && mv -f "$f.tmp" "$f"
+  fi
+done
 mkdir -p "$DIST_DIR"
 cd "$BUILD_DIR"
 info "调用 fnpack build…"
 "$FNPACK" build 2>&1 | tail -20
 
 # fnpack 产物名可能是 appname_version.fpk
-FOUND=$(find "$BUILD_DIR" "$PROJECT_DIR" -maxdepth 2 -name '*.fpk' -newermt '-5 minutes' 2>/dev/null | head -1)
+FOUND=$(find "$BUILD_DIR" -maxdepth 2 -type f -name '*.fpk' 2>/dev/null | head -1)
+if [ -z "$FOUND" ]; then
+  FOUND=$(find "$PROJECT_DIR" -maxdepth 2 -type f -name '*.fpk' ! -path "$DIST_DIR/*" 2>/dev/null | head -1)
+fi
 if [ -n "$FOUND" ]; then
-  TARGET="$DIST_DIR/${APP_NAME}-${VERSION}.fpk"
+  TARGET="$DIST_DIR/${APP_NAME}-${VERSION}${OUTPUT_SUFFIX}.fpk"
   mv -f "$FOUND" "$TARGET"
   SIZE=$(du -h "$TARGET" | cut -f1)
   info "打包完成: $TARGET ($SIZE)"

@@ -1,3 +1,93 @@
 #!/bin/bash
-# 占位实现：本应用无需在该阶段做额外处理
+# 飞牛会在应用文件落地前执行 install_init。
+# 离线包必须在这里导入镜像，否则随后的 docker-project 创建容器时会报
+# "No such image: kaycftunnle:latest"。
+set -eu
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+META_FILE="$SCRIPT_DIR/offline-image.env"
+LOG_FILE="${TRIM_TEMP_LOGFILE:-/dev/stderr}"
+
+log() {
+    printf '%s\n' "$*" >>"$LOG_FILE" 2>/dev/null || printf '%s\n' "$*" >&2
+}
+
+fail() {
+    log "Kay-cftunnle 离线镜像导入失败：$*"
+    exit 1
+}
+
+read_meta() {
+    sed -n "s/^$1=//p" "$META_FILE" | head -1
+}
+
+# 在线包不带 offline-image.env，继续由 compose 从 GHCR 拉取。
+[ -f "$META_FILE" ] || exit 0
+
+IMAGE_NAME=$(read_meta IMAGE_NAME)
+IMAGE_ID=$(read_meta IMAGE_ID)
+[ -n "$IMAGE_NAME" ] || fail "镜像元数据缺少 IMAGE_NAME"
+
+command -v docker >/dev/null 2>&1 || fail "设备未安装 Docker"
+
+if [ -n "$IMAGE_ID" ]; then
+    CURRENT_ID=$(docker image inspect --format '{{.Id}}' "$IMAGE_NAME" 2>/dev/null || true)
+    if [ "$CURRENT_ID" = "$IMAGE_ID" ]; then
+        log "离线镜像已存在，跳过重复导入：$IMAGE_NAME"
+        exit 0
+    fi
+fi
+
+find_app_archive() {
+    local candidate
+    for candidate in \
+        "${TRIM_TEMP_TPKFILE:-}" \
+        "${TRIM_PKGINST_TEMP_DIR:-}" \
+        "$(cd "$SCRIPT_DIR/.." && pwd)"; do
+        [ -n "$candidate" ] || continue
+        if [ -f "$candidate/app.tgz" ]; then
+            printf '%s\n' "$candidate/app.tgz"
+            return 0
+        fi
+        if [ -f "$candidate" ] && [ "$(basename "$candidate")" = "app.tgz" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+find_writable_temp_root() {
+    local candidate
+    for candidate in "${TRIM_PKGINST_TEMP_DIR:-}" "${TMPDIR:-}" /tmp; do
+        [ -n "$candidate" ] || continue
+        if [ -d "$candidate" ] && [ -w "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+APP_ARCHIVE=$(find_app_archive) || fail "找不到安装包内的 app.tgz"
+tar -tzf "$APP_ARCHIVE" docker/image.tar >/dev/null 2>&1 \
+    || fail "安装包缺少 docker/image.tar"
+
+TEMP_ROOT=$(find_writable_temp_root) || fail "找不到可写的安装临时目录"
+TEMP_TAR=$(mktemp "$TEMP_ROOT/kaycftunnle-image.XXXXXX.tar") \
+    || fail "无法创建镜像临时文件"
+trap 'rm -f "$TEMP_TAR"' EXIT
+
+tar -xOzf "$APP_ARCHIVE" docker/image.tar >"$TEMP_TAR" \
+    || fail "无法从安装包解压镜像"
+
+log "正在导入离线镜像 ${IMAGE_NAME}…"
+if ! docker load -i "$TEMP_TAR" >>"$LOG_FILE" 2>&1; then
+    fail "docker load 失败，请确认 Docker 已启动且磁盘空间充足"
+fi
+
+docker image inspect "$IMAGE_NAME" >/dev/null 2>&1 \
+    || fail "导入后仍找不到镜像 ${IMAGE_NAME}"
+
+log "离线镜像导入完成：${IMAGE_NAME}"
 exit 0
