@@ -40,7 +40,7 @@ case "$_OS" in
   darwin*) FNPACK_BASENAME="fnpack-1.2.3-darwin-$_ARCH" ;;
   *) FNPACK_BASENAME="fnpack-1.2.3-windows-amd64" ;;
 esac
-[ -n "$COMSPEC" ] || [ -n "$WINDIR" ] || [ "$_OS" = "windowsnt" ] && FNPACK_BASENAME="fnpack-1.2.3-windows-amd64"
+[ -n "${COMSPEC:-}" ] || [ -n "${WINDIR:-}" ] || [ "$_OS" = "windowsnt" ] && FNPACK_BASENAME="fnpack-1.2.3-windows-amd64"
 FNPACK="$FNPACK_DIR/$FNPACK_BASENAME"
 
 # 本地镜像名刻意带 local/ 前缀：公网不存在，docker 不会去 registry 拉
